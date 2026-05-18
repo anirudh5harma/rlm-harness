@@ -6,10 +6,14 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
   "pydantic>=2",
+  "sqlite-vec>=0.1",
 ]
 
 [project.optional-dependencies]
 graph = ["langgraph>=0.2"]
+memory = [
+  "sentence-transformers>=3",
+]
 mlx = ["mlx-lm"]
 dev = [
   "pytest>=8",
@@ -21,6 +25,9 @@ rlm-harness = "rlm_harness.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["rlm_harness*"]
+
+[tool.setuptools.package-data]
+rlm_harness = ["memory/schema.sql"]
 
 [tool.ruff]
 line-length = 100
