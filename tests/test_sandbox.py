@@ -3,7 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rlm_harness.sandbox import DockerREPL, SandboxConfig
+from rlm_harness.model_client import LMClient
+from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig
 
 IMAGE = "rlm-harness-sandbox:test"
 
@@ -32,6 +33,18 @@ class DockerREPLTests(unittest.TestCase):
                 default_timeout_s=2,
                 start_timeout_s=10,
             )
+        )
+
+    def rlm_sandbox(self, workspace, subcall_config=None):
+        return DockerREPL(
+            SandboxConfig(
+                image=IMAGE,
+                workspace=Path(workspace),
+                default_timeout_s=2,
+                start_timeout_s=10,
+            ),
+            completion_client=LMClient(provider="stub"),
+            subcall_config=subcall_config,
         )
 
     def test_executes_python_and_returns_stdout(self):
@@ -115,6 +128,37 @@ class DockerREPLTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertEqual(completed.stdout.strip(), "")
+
+    def test_rlm_completion_round_trip_from_sandbox_to_host_model(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.rlm_sandbox(temp_dir) as repl:
+                result = repl.execute(
+                    "answer = rlm.completion('summarize this', 'context text')\nprint(answer)"
+                )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.subcalls, 1)
+        self.assertGreater(result.tokens_used, 0)
+        self.assertIn("Stub response for task:", result.stdout)
+        self.assertIn("Query:\nsummarize this", result.stdout)
+
+    def test_rlm_completion_depth_limit_fails_cleanly(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.rlm_sandbox(temp_dir, RLMSubcallConfig(max_depth=0)) as repl:
+                result = repl.execute("print(rlm.completion('too deep', 'context', depth_hint=1))")
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "error")
+        self.assertIn("exceeds max depth", result.stderr)
+
+    def test_rlm_completion_requires_host_client(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.sandbox(temp_dir) as repl:
+                result = repl.execute("print(rlm.completion('query', 'context'))")
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "error")
+        self.assertIn("not enabled", result.stderr)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ from rlm_harness.graph.nodes import Nodes
 from rlm_harness.memory import Memory, MemoryError
 from rlm_harness.model_client import LMClient, LMClientError
 from rlm_harness.model_server import MLXServer, MLXServerConfig, MLXServerError
-from rlm_harness.sandbox import DockerREPL, SandboxConfig, SandboxError
+from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, SandboxError
 from rlm_harness.tracing import TraceStore
 from rlm_harness.types import HarnessState, Msg
 
@@ -241,11 +241,21 @@ def cmd_sandbox_run(args: argparse.Namespace) -> int:
         workspace=Path(args.workspace),
         memory=args.memory,
         cpus=args.cpus,
-        default_timeout_s=args.timeout,
+        default_timeout_s=args.cell_timeout,
+    )
+    subcall_config = RLMSubcallConfig(
+        max_depth=args.max_depth,
+        max_subcalls=args.max_subcalls,
+        token_budget=args.token_budget,
+        max_tokens=args.max_tokens,
     )
     try:
-        with DockerREPL(config) as repl:
-            result = repl.execute(args.code, timeout_s=args.timeout)
+        with DockerREPL(
+            config,
+            completion_client=build_client(args),
+            subcall_config=subcall_config,
+        ) as repl:
+            result = repl.execute(args.code, timeout_s=args.cell_timeout)
     except SandboxError as exc:
         print(f"Sandbox run failed: {exc}", file=sys.stderr)
         return 1
@@ -261,12 +271,13 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="rlm-harness")
     subparsers = root.add_subparsers(dest="command", required=True)
 
-    def add_model_args(command: argparse.ArgumentParser) -> None:
+    def add_model_args(command: argparse.ArgumentParser, include_timeout: bool = True) -> None:
         command.add_argument("--provider", default="stub", choices=["stub", "openai-compatible"])
         command.add_argument("--model", default="stub")
         command.add_argument("--base-url", default="http://127.0.0.1:8080/v1")
         command.add_argument("--api-key", default=None)
-        command.add_argument("--timeout", type=int, default=120)
+        if include_timeout:
+            command.add_argument("--timeout", type=int, default=120)
 
     run = subparsers.add_parser("run")
     run.add_argument("task")
@@ -359,7 +370,13 @@ def parser() -> argparse.ArgumentParser:
     sandbox_run.add_argument("--workspace", default=".")
     sandbox_run.add_argument("--memory", default="512m")
     sandbox_run.add_argument("--cpus", type=float, default=1.0)
-    sandbox_run.add_argument("--timeout", type=float, default=60)
+    sandbox_run.add_argument("--timeout", dest="cell_timeout", type=float, default=60)
+    sandbox_run.add_argument("--max-depth", type=int, default=3)
+    sandbox_run.add_argument("--max-subcalls", type=int, default=32)
+    sandbox_run.add_argument("--token-budget", type=int, default=200000)
+    sandbox_run.add_argument("--max-tokens", type=int, default=512)
+    sandbox_run.add_argument("--model-timeout", dest="timeout", type=int, default=120)
+    add_model_args(sandbox_run, include_timeout=False)
     sandbox_run.set_defaults(func=cmd_sandbox_run)
     return root
 

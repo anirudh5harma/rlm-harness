@@ -10,6 +10,8 @@ class ExecutionResult:
     status: str
     elapsed_ms: int
     timed_out: bool = False
+    subcalls: int = 0
+    tokens_used: int = 0
 
     @property
     def ok(self) -> bool:

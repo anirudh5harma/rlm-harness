@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from rlm_harness.model_client import LMClient, LMClientError
 from rlm_harness.sandbox.types import ExecutionResult
+from rlm_harness.types import Msg
 
 
 class SandboxError(RuntimeError):
@@ -33,11 +35,31 @@ class SandboxConfig:
     remove_on_stop: bool = True
 
 
+@dataclass(frozen=True)
+class RLMSubcallConfig:
+    max_depth: int = 3
+    max_subcalls: int = 32
+    token_budget: int = 200_000
+    max_query_chars: int = 4_000
+    max_context_chars: int = 20_000
+    max_tokens: int = 512
+    temperature: float = 0.1
+
+
 class DockerREPL:
-    def __init__(self, config: Optional[SandboxConfig] = None):
+    def __init__(
+        self,
+        config: Optional[SandboxConfig] = None,
+        completion_client: Optional[LMClient] = None,
+        subcall_config: Optional[RLMSubcallConfig] = None,
+    ):
         self.config = config or SandboxConfig()
+        self.completion_client = completion_client
+        self.subcall_config = subcall_config or RLMSubcallConfig()
         self.container_name = f"rlm-harness-sandbox-{uuid.uuid4().hex[:12]}"
         self._process: Optional[subprocess.Popen[str]] = None
+        self._subcalls = 0
+        self._tokens_used = 0
 
     @classmethod
     def build_image(
@@ -121,13 +143,16 @@ class DockerREPL:
 
         request = {
             "id": uuid.uuid4().hex,
+            "type": "execute",
             "code": code,
             "timeout_s": timeout_s or self.config.default_timeout_s,
         }
+        subcalls_before = self._subcalls
+        tokens_before = self._tokens_used
         self._process.stdin.write(json.dumps(request, sort_keys=True) + "\n")
         self._process.stdin.flush()
 
-        response_line = self._read_response(request["id"], float(request["timeout_s"]) + 5)
+        response_line = self._read_execute_result(request["id"], float(request["timeout_s"]) + 5)
         try:
             payload = json.loads(response_line)
         except json.JSONDecodeError as exc:
@@ -139,6 +164,8 @@ class DockerREPL:
             status=str(payload.get("status", "error")),
             elapsed_ms=int(payload.get("elapsed_ms", 0)),
             timed_out=bool(payload.get("timed_out", False)),
+            subcalls=self._subcalls - subcalls_before,
+            tokens_used=self._tokens_used - tokens_before,
         )
 
     def stop(self) -> None:
@@ -181,7 +208,7 @@ class DockerREPL:
             return
         raise SandboxError("sandbox did not start before timeout")
 
-    def _read_response(self, request_id: str, timeout_s: float) -> str:
+    def _read_execute_result(self, request_id: str, timeout_s: float) -> str:
         if not self._process or not self._process.stdout:
             raise SandboxError("sandbox process has no stdout")
         deadline = time.monotonic() + timeout_s
@@ -196,6 +223,90 @@ class DockerREPL:
                 payload = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if payload.get("id") == request_id:
+            message_type = payload.get("type")
+            if message_type == "rlm_completion_request":
+                self._service_rlm_completion(payload)
+                continue
+            if payload.get("id") == request_id and message_type == "execute_result":
                 return line
         raise SandboxError("timed out waiting for sandbox response")
+
+    def _service_rlm_completion(self, request: dict) -> None:
+        if not self._process or not self._process.stdin:
+            raise SandboxError("sandbox process has no stdin")
+
+        request_id = str(request.get("id", ""))
+        response = {
+            "type": "rlm_completion_response",
+            "id": request_id,
+            "content": "",
+            "error": None,
+        }
+        try:
+            response["content"] = self._complete_for_sandbox(request)
+        except Exception as exc:
+            response["error"] = str(exc)
+
+        self._process.stdin.write(json.dumps(response, sort_keys=True) + "\n")
+        self._process.stdin.flush()
+
+    def _complete_for_sandbox(self, request: dict) -> str:
+        if self.completion_client is None:
+            raise SandboxError("rlm.completion is not enabled for this sandbox")
+
+        depth_hint = int(request.get("depth_hint", -1))
+        if depth_hint > self.subcall_config.max_depth:
+            raise SandboxError(
+                f"rlm.completion depth {depth_hint} exceeds max depth "
+                f"{self.subcall_config.max_depth}"
+            )
+        if self._subcalls >= self.subcall_config.max_subcalls:
+            raise SandboxError("rlm.completion subcall limit exceeded")
+
+        query = str(request.get("query", ""))
+        context = str(request.get("context", ""))
+        if not query.strip():
+            raise SandboxError("rlm.completion query must be non-empty")
+        if len(query) > self.subcall_config.max_query_chars:
+            raise SandboxError("rlm.completion query is too large")
+        if len(context) > self.subcall_config.max_context_chars:
+            raise SandboxError("rlm.completion context is too large")
+
+        requested_max_tokens = request.get("max_tokens")
+        max_tokens = self.subcall_config.max_tokens
+        if requested_max_tokens is not None:
+            max_tokens = min(max_tokens, int(requested_max_tokens))
+
+        estimated_prompt_tokens = estimate_tokens(query) + estimate_tokens(context)
+        projected_tokens = self._tokens_used + estimated_prompt_tokens + max_tokens
+        if projected_tokens > self.subcall_config.token_budget:
+            raise SandboxError("rlm.completion token budget exceeded")
+
+        messages = [
+            Msg(
+                role="system",
+                content=(
+                    "You are a recursive sub-call inside an RLM sandbox. "
+                    "Answer the query using only the provided context."
+                ),
+            ),
+            Msg(role="user", content=f"Query:\n{query}\n\nContext:\n{context}"),
+        ]
+        try:
+            completion = self.completion_client.complete(
+                messages,
+                max_tokens=max_tokens,
+                temperature=self.subcall_config.temperature,
+            )
+        except LMClientError as exc:
+            raise SandboxError(f"rlm.completion model request failed: {exc}") from exc
+
+        self._subcalls += 1
+        completion_tokens = completion.completion_tokens or estimate_tokens(completion.content)
+        prompt_tokens = completion.prompt_tokens or estimated_prompt_tokens
+        self._tokens_used += prompt_tokens + completion_tokens
+        return completion.content
+
+
+def estimate_tokens(text: str) -> int:
+    return max(1, len(text) // 4)

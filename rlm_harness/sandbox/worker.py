@@ -8,6 +8,8 @@ import sys
 import time
 import traceback
 
+from rlm_shim import RLMBridge
+
 
 class CellTimeout(Exception):
     pass
@@ -50,7 +52,7 @@ def execute_cell(code: str, timeout_s: float, namespace: dict) -> dict:
 
 
 def main() -> int:
-    namespace = {"__name__": "__sandbox__"}
+    namespace = {"__name__": "__sandbox__", "rlm": RLMBridge()}
     for raw_line in sys.stdin:
         try:
             request = json.loads(raw_line)
@@ -61,9 +63,11 @@ def main() -> int:
                 raise ValueError("timeout_s must be positive")
             result = execute_cell(code, timeout_s, namespace)
             result["id"] = request_id
+            result["type"] = "execute_result"
         except BaseException as exc:
             result = {
                 "id": None,
+                "type": "execute_result",
                 "stdout": "",
                 "stderr": f"{type(exc).__name__}: {exc}\n",
                 "status": "protocol_error",
