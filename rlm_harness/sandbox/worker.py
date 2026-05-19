@@ -9,6 +9,18 @@ import time
 import traceback
 
 from rlm_shim import RLMBridge
+from sandbox_tools import (
+    apply_patch,
+    git_diff,
+    git_log,
+    git_status,
+    read_file,
+    run_shell,
+    search_code,
+    tool_help,
+    tool_names,
+    write_file,
+)
 
 
 class CellTimeout(Exception):
@@ -52,7 +64,20 @@ def execute_cell(code: str, timeout_s: float, namespace: dict) -> dict:
 
 
 def main() -> int:
-    namespace = {"__name__": "__sandbox__", "rlm": RLMBridge()}
+    namespace = {
+        "__name__": "__sandbox__",
+        "rlm": RLMBridge(),
+        "read_file": read_file,
+        "write_file": write_file,
+        "apply_patch": apply_patch,
+        "run_shell": run_shell,
+        "git_status": git_status,
+        "git_diff": git_diff,
+        "git_log": git_log,
+        "search_code": search_code,
+        "tool_help": tool_help,
+        "tool_names": tool_names,
+    }
     for raw_line in sys.stdin:
         try:
             request = json.loads(raw_line)

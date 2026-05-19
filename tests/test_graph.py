@@ -292,6 +292,49 @@ class GraphTests(unittest.TestCase):
         self.assertIn("alpha.txt", report)
 
     @unittest.skipUnless(docker_available(), "Docker daemon is not available")
+    def test_stub_graph_fixes_failing_unittest_through_coding_tools(self):
+        DockerREPL.build_image(image=IMAGE)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "mathlib.py").write_text(
+                "def add(a, b):\n    return a - b\n",
+                encoding="utf-8",
+            )
+            (workspace / "test_mathlib.py").write_text(
+                "import unittest\n"
+                "from mathlib import add\n\n"
+                "class MathTests(unittest.TestCase):\n"
+                "    def test_add(self):\n"
+                "        self.assertEqual(add(2, 3), 5)\n\n"
+                "if __name__ == '__main__':\n"
+                "    unittest.main()\n",
+                encoding="utf-8",
+            )
+            traces = TraceStore(workspace / "traces.db")
+            run_id = traces.start_run("Fix failing test in mathlib.py", str(workspace))
+            state = HarnessState(
+                task="Fix failing test in mathlib.py",
+                workspace=str(workspace),
+                thread_id=run_id,
+                run_id=run_id,
+            )
+            runtime = GraphRuntimeConfig(
+                sandbox_enabled=True,
+                sandbox_config=SandboxConfig(
+                    image=IMAGE,
+                    workspace=workspace,
+                    default_timeout_s=10,
+                ),
+            )
+            graph = build_graph(Nodes(LMClient(provider="stub"), traces, runtime), backend="simple")
+            final_state = graph.invoke(state)
+            mathlib_content = (workspace / "mathlib.py").read_text(encoding="utf-8")
+
+        self.assertEqual(final_state.status, "done")
+        self.assertIn("return a + b", mathlib_content)
+        self.assertIn("OK", final_state.final_answer)
+
+    @unittest.skipUnless(docker_available(), "Docker daemon is not available")
     def test_act_retries_malformed_action_json(self):
         DockerREPL.build_image(image=IMAGE)
         with tempfile.TemporaryDirectory() as temp_dir:

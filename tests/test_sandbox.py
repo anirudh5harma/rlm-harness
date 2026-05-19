@@ -112,6 +112,36 @@ class DockerREPLTests(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), "hello sandbox")
         self.assertEqual(output, "hello sandbox")
 
+    def test_coding_tools_are_available_and_workspace_scoped(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            with self.sandbox(workspace) as repl:
+                result = repl.execute(
+                    "print(','.join(tool_names()))\n"
+                    "write_file('src/example.py', 'def add(a, b):\\n    return a + b\\n')\n"
+                    "print(read_file('src/example.py'))\n"
+                    "print(search_code('def add', 'src'), end='')\n"
+                    "shell = run_shell('python -c \"print(6 * 7)\"')\n"
+                    "print(shell['stdout'], end='')\n"
+                    "run_shell('git init >/dev/null')\n"
+                    "print(git_status(), end='')"
+                )
+
+        self.assertTrue(result.ok)
+        self.assertIn("read_file", result.stdout)
+        self.assertIn("write_file", result.stdout)
+        self.assertIn("def add(a, b):", result.stdout)
+        self.assertIn("42", result.stdout)
+        self.assertIn("src/example.py", result.stdout)
+
+    def test_coding_tools_reject_file_path_escape(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.sandbox(temp_dir) as repl:
+                result = repl.execute("print(read_file('../outside.txt'))")
+
+        self.assertFalse(result.ok)
+        self.assertIn("path escapes workspace", result.stderr)
+
     def test_container_cleanup_on_exit(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             repl = self.sandbox(temp_dir)

@@ -75,9 +75,21 @@ class LMClient:
         lower = user_text.lower()
         if "list files" in lower or "list the files" in lower:
             code = (
-                "from pathlib import Path\n"
-                "for path in sorted(Path('/workspace').iterdir(), key=lambda p: p.name):\n"
-                "    print(path.name)"
+                "result = run_shell('find . -maxdepth 1 -mindepth 1 | sort')\n"
+                "print(result['stdout'].replace('./', ''), end='')\n"
+                "if result['stderr']:\n"
+                "    print(result['stderr'], end='')"
+            )
+        elif "fix failing test" in lower or "fix the failing test" in lower:
+            code = (
+                "content = read_file('mathlib.py')\n"
+                "if 'return a - b' in content:\n"
+                "    write_file('mathlib.py', content.replace('return a - b', 'return a + b'))\n"
+                "result = run_shell('python -m unittest', timeout=30)\n"
+                "print(result['stdout'], end='')\n"
+                "print(result['stderr'], end='')\n"
+                "if result['returncode'] != 0:\n"
+                "    raise RuntimeError('tests failed')"
             )
         elif "rlm.completion" in lower or "recursive" in lower or "sub-call" in lower:
             code = (

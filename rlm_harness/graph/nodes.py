@@ -9,6 +9,7 @@ from rlm_harness.memory import Memory
 from rlm_harness.memory.paging import MemoryPager, MemoryPagingConfig
 from rlm_harness.model_client import LMClient
 from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, SandboxError
+from rlm_harness.sandbox.tools import TOOL_SCHEMAS
 from rlm_harness.tracing import TraceStore
 from rlm_harness.types import HarnessState, Msg
 
@@ -251,7 +252,9 @@ class Nodes:
                     "Return exactly one JSON object and no markdown. "
                     'The schema is: {"type":"python","code":"..."} . '
                     "The code runs in a Docker sandbox with the workspace mounted at /workspace. "
-                    "Use Python to inspect or manipulate the workspace. "
+                    "Use the provided Python tool functions to inspect or manipulate "
+                    "the workspace: "
+                    f"{render_tool_list()}. "
                     "You may call rlm.completion(query, context, depth_hint=-1) for a recursive "
                     "host-mediated model sub-call."
                 ),
@@ -357,3 +360,7 @@ def parse_observation_status(observation: str) -> Optional[str]:
         return None
     status = payload.get("status")
     return status if isinstance(status, str) else None
+
+
+def render_tool_list() -> str:
+    return ", ".join(str(schema["name"]) for schema in TOOL_SCHEMAS)
