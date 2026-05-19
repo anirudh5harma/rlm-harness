@@ -12,6 +12,7 @@ from rlm_harness.graph.nodes import Nodes
 from rlm_harness.memory import Memory, MemoryError
 from rlm_harness.model_client import LMClient, LMClientError
 from rlm_harness.model_server import MLXServer, MLXServerConfig, MLXServerError
+from rlm_harness.sandbox import DockerREPL, SandboxConfig, SandboxError
 from rlm_harness.tracing import TraceStore
 from rlm_harness.types import HarnessState, Msg
 
@@ -220,6 +221,42 @@ def cmd_mem_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sandbox_build(args: argparse.Namespace) -> int:
+    try:
+        DockerREPL.build_image(
+            image=args.image,
+            dockerfile=Path(args.dockerfile),
+            context=Path(args.context),
+        )
+    except SandboxError as exc:
+        print(f"Sandbox build failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"built {args.image}")
+    return 0
+
+
+def cmd_sandbox_run(args: argparse.Namespace) -> int:
+    config = SandboxConfig(
+        image=args.image,
+        workspace=Path(args.workspace),
+        memory=args.memory,
+        cpus=args.cpus,
+        default_timeout_s=args.timeout,
+    )
+    try:
+        with DockerREPL(config) as repl:
+            result = repl.execute(args.code, timeout_s=args.timeout)
+    except SandboxError as exc:
+        print(f"Sandbox run failed: {exc}", file=sys.stderr)
+        return 1
+
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    return 0 if result.ok else 1
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="rlm-harness")
     subparsers = root.add_subparsers(dest="command", required=True)
@@ -306,6 +343,24 @@ def parser() -> argparse.ArgumentParser:
     mem_search.add_argument("--source-thread", default=None)
     mem_search.add_argument("--limit", type=int, default=5)
     mem_search.set_defaults(func=cmd_mem_search)
+
+    sandbox = subparsers.add_parser("sandbox")
+    sandbox_subparsers = sandbox.add_subparsers(dest="sandbox_command", required=True)
+
+    sandbox_build = sandbox_subparsers.add_parser("build")
+    sandbox_build.add_argument("--image", default="rlm-harness-sandbox:latest")
+    sandbox_build.add_argument("--dockerfile", default="docker/sandbox.Dockerfile")
+    sandbox_build.add_argument("--context", default=".")
+    sandbox_build.set_defaults(func=cmd_sandbox_build)
+
+    sandbox_run = sandbox_subparsers.add_parser("run")
+    sandbox_run.add_argument("code")
+    sandbox_run.add_argument("--image", default="rlm-harness-sandbox:latest")
+    sandbox_run.add_argument("--workspace", default=".")
+    sandbox_run.add_argument("--memory", default="512m")
+    sandbox_run.add_argument("--cpus", type=float, default=1.0)
+    sandbox_run.add_argument("--timeout", type=float, default=60)
+    sandbox_run.set_defaults(func=cmd_sandbox_run)
     return root
 
 
