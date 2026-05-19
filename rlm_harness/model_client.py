@@ -55,6 +55,8 @@ class LMClient:
         lower = user_text.lower()
         if "return a concise numbered plan" in lower:
             content = "1. Inspect the task.\n2. Produce a concise response.\n3. Record the result."
+        elif "task:" in lower and "return only valid json" in lower:
+            content = self._stub_action(user_text)
         elif "decide whether the task is complete" in lower:
             content = "done"
         else:
@@ -66,6 +68,25 @@ class LMClient:
             provider=self.provider,
             latency_ms=int((time.perf_counter() - started) * 1000),
         )
+
+    def _stub_action(self, user_text: str) -> str:
+        lower = user_text.lower()
+        if "list files" in lower or "list the files" in lower:
+            code = (
+                "from pathlib import Path\n"
+                "for path in sorted(Path('/workspace').iterdir(), key=lambda p: p.name):\n"
+                "    print(path.name)"
+            )
+        elif "rlm.completion" in lower or "recursive" in lower or "sub-call" in lower:
+            code = (
+                "answer = rlm.completion('Summarize the provided context.', "
+                "'sandbox recursive subcall context', depth_hint=1)\n"
+                "print(answer)"
+            )
+        else:
+            escaped = user_text.replace("\\", "\\\\").replace("'", "\\'")
+            code = f"print('Stub action completed for task: {escaped[:200]}')"
+        return json.dumps({"type": "python", "code": code}, sort_keys=True)
 
     def _openai_compatible_complete(
         self,

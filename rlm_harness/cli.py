@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from rlm_harness.graph.build import build_graph
-from rlm_harness.graph.nodes import Nodes
+from rlm_harness.graph.nodes import GraphRuntimeConfig, Nodes
 from rlm_harness.memory import Memory, MemoryError
 from rlm_harness.model_client import LMClient, LMClientError
 from rlm_harness.model_server import MLXServer, MLXServerConfig, MLXServerError
@@ -49,15 +49,36 @@ def cmd_run(args: argparse.Namespace) -> int:
     traces.event(
         run_id,
         "run_started",
-        {"task": args.task, "workspace": str(workspace)},
+        {
+            "task": args.task,
+            "workspace": str(workspace),
+            "sandbox_enabled": not args.no_sandbox,
+        },
         node="cli",
     )
 
     try:
-        graph = build_graph(Nodes(build_client(args), traces), backend=args.graph_backend)
+        runtime = GraphRuntimeConfig(
+            sandbox_enabled=not args.no_sandbox,
+            sandbox_config=SandboxConfig(
+                image=args.sandbox_image,
+                workspace=workspace,
+                memory=args.sandbox_memory,
+                cpus=args.sandbox_cpus,
+                default_timeout_s=args.sandbox_timeout,
+            ),
+            subcall_config=RLMSubcallConfig(
+                max_depth=args.max_depth,
+                max_subcalls=args.max_subcalls,
+                token_budget=args.token_budget,
+                max_tokens=args.subcall_max_tokens,
+            ),
+            max_action_retries=args.max_action_retries,
+        )
+        graph = build_graph(Nodes(build_client(args), traces, runtime), backend=args.graph_backend)
         final_state = graph.invoke(state)
         traces.finish_run(run_id, final_state.status)
-    except LMClientError as exc:
+    except (LMClientError, SandboxError) as exc:
         traces.event(run_id, "error", {"message": str(exc)}, node="cli")
         traces.finish_run(run_id, "error")
         print(f"Run failed: {exc}", file=sys.stderr)
@@ -68,7 +89,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(final_state.final_answer)
     print()
     print(traces.render_report(run_id))
-    return 0
+    return 0 if final_state.status == "done" else 1
 
 
 def cmd_benchmark_model(args: argparse.Namespace) -> int:
@@ -286,6 +307,15 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--thread-id", default=None)
     run.add_argument("--token-budget", type=int, default=100000)
     run.add_argument("--graph-backend", default="auto", choices=["auto", "simple", "langgraph"])
+    run.add_argument("--no-sandbox", action="store_true")
+    run.add_argument("--sandbox-image", default="rlm-harness-sandbox:latest")
+    run.add_argument("--sandbox-memory", default="512m")
+    run.add_argument("--sandbox-cpus", type=float, default=1.0)
+    run.add_argument("--sandbox-timeout", type=float, default=60)
+    run.add_argument("--max-depth", type=int, default=3)
+    run.add_argument("--max-subcalls", type=int, default=32)
+    run.add_argument("--subcall-max-tokens", type=int, default=512)
+    run.add_argument("--max-action-retries", type=int, default=1)
     add_model_args(run)
     run.set_defaults(func=cmd_run)
 

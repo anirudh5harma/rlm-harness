@@ -21,8 +21,21 @@ class HarnessGraph:
             state = self.nodes.reflect(state)
             if state.status == "done":
                 return self.nodes.done(state)
+            if state.status == "error":
+                return state
         state.status = "stopped"
         return state
+
+
+class LangGraphHarnessGraph:
+    def __init__(self, graph):
+        self.graph = graph
+
+    def invoke(self, state: HarnessState) -> HarnessState:
+        result = self.graph.invoke(state)
+        if isinstance(result, HarnessState):
+            return result
+        return HarnessState.model_validate(result)
 
 
 def _build_langgraph(nodes: Nodes):
@@ -44,11 +57,11 @@ def _build_langgraph(nodes: Nodes):
     graph.add_edge("observe", "reflect")
     graph.add_conditional_edges(
         "reflect",
-        lambda state: "done" if state.status == "done" else "act",
-        {"done": "done", "act": "act"},
+        lambda state: state.status if state.status in {"done", "error"} else "act",
+        {"done": "done", "error": END, "act": "act"},
     )
     graph.add_edge("done", END)
-    return graph.compile()
+    return LangGraphHarnessGraph(graph.compile())
 
 
 def build_graph(nodes: Nodes, backend: Literal["auto", "simple", "langgraph"] = "auto"):
