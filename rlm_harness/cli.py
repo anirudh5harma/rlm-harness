@@ -5,11 +5,12 @@ import os
 import statistics
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from rlm_harness.graph.build import build_graph
 from rlm_harness.graph.nodes import GraphRuntimeConfig, Nodes
-from rlm_harness.memory import Memory, MemoryError
+from rlm_harness.memory import Memory, MemoryError, MemoryPagingConfig
 from rlm_harness.model_client import LMClient, LMClientError
 from rlm_harness.model_server import MLXServer, MLXServerConfig, MLXServerError
 from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, SandboxError
@@ -53,32 +54,48 @@ def cmd_run(args: argparse.Namespace) -> int:
             "task": args.task,
             "workspace": str(workspace),
             "sandbox_enabled": not args.no_sandbox,
+            "memory_enabled": not args.no_memory,
         },
         node="cli",
     )
 
     try:
-        runtime = GraphRuntimeConfig(
-            sandbox_enabled=not args.no_sandbox,
-            sandbox_config=SandboxConfig(
-                image=args.sandbox_image,
-                workspace=workspace,
-                memory=args.sandbox_memory,
-                cpus=args.sandbox_cpus,
-                default_timeout_s=args.sandbox_timeout,
-            ),
-            subcall_config=RLMSubcallConfig(
-                max_depth=args.max_depth,
-                max_subcalls=args.max_subcalls,
-                token_budget=args.token_budget,
-                max_tokens=args.subcall_max_tokens,
-            ),
-            max_action_retries=args.max_action_retries,
+        memory_context = (
+            nullcontext(None) if args.no_memory else Memory(Path(args.memory_db))
         )
-        graph = build_graph(Nodes(build_client(args), traces, runtime), backend=args.graph_backend)
-        final_state = graph.invoke(state)
+        with memory_context as memory:
+            runtime = GraphRuntimeConfig(
+                sandbox_enabled=not args.no_sandbox,
+                sandbox_config=SandboxConfig(
+                    image=args.sandbox_image,
+                    workspace=workspace,
+                    memory=args.sandbox_memory,
+                    cpus=args.sandbox_cpus,
+                    default_timeout_s=args.sandbox_timeout,
+                ),
+                subcall_config=RLMSubcallConfig(
+                    max_depth=args.max_depth,
+                    max_subcalls=args.max_subcalls,
+                    token_budget=args.token_budget,
+                    max_tokens=args.subcall_max_tokens,
+                ),
+                max_action_retries=args.max_action_retries,
+                memory=memory,
+                memory_paging=MemoryPagingConfig(
+                    max_history_tokens=args.max_history_tokens,
+                    preserve_recent_steps=args.preserve_recent_steps,
+                    recall_limit=args.recall_limit,
+                    archival_limit=args.archival_limit,
+                    summary_max_tokens=args.summary_max_tokens,
+                ),
+            )
+            graph = build_graph(
+                Nodes(build_client(args), traces, runtime),
+                backend=args.graph_backend,
+            )
+            final_state = graph.invoke(state)
         traces.finish_run(run_id, final_state.status)
-    except (LMClientError, SandboxError) as exc:
+    except (LMClientError, MemoryError, SandboxError) as exc:
         traces.event(run_id, "error", {"message": str(exc)}, node="cli")
         traces.finish_run(run_id, "error")
         print(f"Run failed: {exc}", file=sys.stderr)
@@ -305,6 +322,13 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--workspace", default=".")
     run.add_argument("--trace-db", default=str(default_trace_path()))
     run.add_argument("--thread-id", default=None)
+    run.add_argument("--memory-db", default=str(default_memory_path()))
+    run.add_argument("--no-memory", action="store_true")
+    run.add_argument("--max-history-tokens", type=int, default=1600)
+    run.add_argument("--preserve-recent-steps", type=int, default=4)
+    run.add_argument("--recall-limit", type=int, default=6)
+    run.add_argument("--archival-limit", type=int, default=3)
+    run.add_argument("--summary-max-tokens", type=int, default=300)
     run.add_argument("--token-budget", type=int, default=100000)
     run.add_argument("--graph-backend", default="auto", choices=["auto", "simple", "langgraph"])
     run.add_argument("--no-sandbox", action="store_true")

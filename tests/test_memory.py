@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from rlm_harness import cli
-from rlm_harness.memory import Memory, MemoryError, MemoryValidationError
+from rlm_harness.memory import Memory, MemoryError, MemoryPagingConfig, MemoryValidationError
 from rlm_harness.memory.embed import HashingEmbedder
 
 
@@ -151,6 +151,10 @@ class MemoryTests(unittest.TestCase):
                     memory.archival_add("fact", "content", metadata={"bad": object()})
             finally:
                 memory.close()
+
+    def test_memory_paging_config_validates_positive_limits(self):
+        with self.assertRaises(ValueError):
+            MemoryPagingConfig(max_history_tokens=0)
 
     def test_corrupt_database_fails_loudly(self):
         with tempfile.TemporaryDirectory() as temp_dir:

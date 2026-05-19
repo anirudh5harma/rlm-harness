@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from rlm_harness.memory import Memory
+from rlm_harness.memory.paging import MemoryPager, MemoryPagingConfig
 from rlm_harness.model_client import LMClient
 from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, SandboxError
 from rlm_harness.tracing import TraceStore
@@ -21,6 +23,8 @@ class GraphRuntimeConfig:
     sandbox_config: Optional[SandboxConfig] = None
     subcall_config: Optional[RLMSubcallConfig] = None
     max_action_retries: int = 1
+    memory: Optional[Memory] = None
+    memory_paging: MemoryPagingConfig = MemoryPagingConfig()
 
 
 def parse_numbered_plan(text: str) -> list[str]:
@@ -69,8 +73,19 @@ class Nodes:
         self.client = client
         self.traces = traces
         self.runtime = runtime or GraphRuntimeConfig()
+        self.memory = (
+            MemoryPager(
+                self.runtime.memory,
+                self.client,
+                self.traces,
+                self.runtime.memory_paging,
+            )
+            if self.runtime.memory is not None
+            else None
+        )
 
     def plan(self, state: HarnessState) -> HarnessState:
+        memory_context = self._memory_context(state)
         messages = [
             Msg(role="system", content="You are the planning node for a coding-agent harness."),
             Msg(
@@ -78,6 +93,7 @@ class Nodes:
                 content=(
                     "Return a concise numbered plan for this task. "
                     f"Do not use tools yet.\n\nTask: {state.task}"
+                    f"{memory_context}"
                 ),
             ),
         ]
@@ -110,7 +126,10 @@ class Nodes:
                     "This first implementation has no tools. Produce a direct, useful response."
                 ),
             ),
-            Msg(role="user", content=f"Task: {state.task}\nPlan: {state.plan}"),
+            Msg(
+                role="user",
+                content=f"Task: {state.task}\nPlan: {state.plan}{self._memory_context(state)}",
+            ),
         ]
         completion = self.client.complete(messages, max_tokens=700, temperature=0.2)
         state.scratch["last_action"] = completion.content
@@ -241,7 +260,8 @@ class Nodes:
                 role="user",
                 content=(
                     "Return only valid JSON for this action.\n"
-                    f"Task: {state.task}\nPlan: {state.plan}{retry}"
+                    f"Task: {state.task}\nPlan: {state.plan}"
+                    f"{self._memory_context(state)}{retry}"
                 ),
             ),
         ]
@@ -284,6 +304,7 @@ class Nodes:
                 content=(
                     "Decide whether the task is complete. Reply with only done or continue.\n\n"
                     f"Task: {state.task}\nLast observation: {last_observation}"
+                    f"{self._memory_context(state)}"
                 ),
             ),
         ]
@@ -297,6 +318,23 @@ class Nodes:
             node="reflect",
         )
         return state
+
+    def memory_read(self, state: HarnessState) -> HarnessState:
+        if self.memory is None:
+            return state
+        return self.memory.hydrate(state)
+
+    def memory_write(self, state: HarnessState) -> HarnessState:
+        if self.memory is None:
+            return state
+        return self.memory.persist_new_history(state)
+
+    @staticmethod
+    def _memory_context(state: HarnessState) -> str:
+        context = state.scratch.get("memory_context", "")
+        if not isinstance(context, str) or not context.strip():
+            return ""
+        return f"\n\nMemory context:\n{context}"
 
     def done(self, state: HarnessState) -> HarnessState:
         state.status = "done"

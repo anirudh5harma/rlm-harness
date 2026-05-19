@@ -1,6 +1,7 @@
 """Tiered memory store for RLM Harness."""
 
 from rlm_harness.memory.embed import Embedder, HashingEmbedder, SentenceTransformerEmbedder
+from rlm_harness.memory.paging import MemoryPager, MemoryPagingConfig
 from rlm_harness.memory.store import (
     ArchivalMemory,
     CoreMemory,
@@ -18,6 +19,8 @@ __all__ = [
     "HashingEmbedder",
     "Memory",
     "MemoryError",
+    "MemoryPager",
+    "MemoryPagingConfig",
     "MemorySearchResult",
     "MemoryValidationError",
     "RecallEvent",

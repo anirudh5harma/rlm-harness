@@ -55,6 +55,8 @@ class LMClient:
         lower = user_text.lower()
         if "return a concise numbered plan" in lower:
             content = "1. Inspect the task.\n2. Produce a concise response.\n3. Record the result."
+        elif lower.lstrip().startswith("summarize older harness history."):
+            content = self._stub_summary(user_text)
         elif "task:" in lower and "return only valid json" in lower:
             content = self._stub_action(user_text)
         elif "decide whether the task is complete" in lower:
@@ -87,6 +89,11 @@ class LMClient:
             escaped = user_text.replace("\\", "\\\\").replace("'", "\\'")
             code = f"print('Stub action completed for task: {escaped[:200]}')"
         return json.dumps({"type": "python", "code": code}, sort_keys=True)
+
+    @staticmethod
+    def _stub_summary(user_text: str) -> str:
+        compact = " ".join(user_text.strip().split())
+        return f"Archived harness history summary: {compact[:500]}"
 
     def _openai_compatible_complete(
         self,

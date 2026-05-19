@@ -11,6 +11,7 @@ from rlm_harness.graph.nodes import (
     parse_numbered_plan,
     parse_python_action,
 )
+from rlm_harness.memory import Memory, MemoryPagingConfig
 from rlm_harness.model_client import LMClient
 from rlm_harness.sandbox import DockerREPL, SandboxConfig
 from rlm_harness.tracing import TraceStore
@@ -62,6 +63,22 @@ class BadThenGoodActionClient(LMClient):
         )
 
 
+class CapturingClient(LMClient):
+    def __init__(self):
+        super().__init__(provider="stub")
+        self.plan_prompt = ""
+
+    def complete(self, messages, max_tokens=512, temperature=0.2):
+        user_text = ""
+        for message in reversed(list(messages)):
+            if message.role == "user":
+                user_text = message.content
+                break
+        if "Return a concise numbered plan" in user_text:
+            self.plan_prompt = user_text
+        return super().complete(messages, max_tokens=max_tokens, temperature=temperature)
+
+
 class GraphTests(unittest.TestCase):
     def test_parse_numbered_plan(self):
         self.assertEqual(parse_numbered_plan("1. Inspect\n2. Act"), ["Inspect", "Act"])
@@ -85,6 +102,138 @@ class GraphTests(unittest.TestCase):
             self.assertEqual(final_state.status, "done")
             self.assertTrue(final_state.final_answer)
             self.assertIn("Trace report", traces.render_report(run_id))
+
+    def test_memory_paging_writes_archival_summary_and_bounds_history(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir)
+            memory = Memory(path / "memory.db")
+            traces = TraceStore(path / "traces.db")
+            run_id = traces.start_run("explain alpha beta gamma workspace notes", temp_dir)
+            state = HarnessState(
+                task="explain alpha beta gamma workspace notes",
+                workspace=temp_dir,
+                thread_id=run_id,
+                run_id=run_id,
+            )
+            runtime = GraphRuntimeConfig(
+                memory=memory,
+                memory_paging=MemoryPagingConfig(
+                    max_history_tokens=8,
+                    preserve_recent_steps=1,
+                    recall_limit=3,
+                    archival_limit=3,
+                ),
+            )
+            try:
+                graph = build_graph(
+                    Nodes(LMClient(provider="stub"), traces, runtime),
+                    backend="simple",
+                )
+                final_state = graph.invoke(state)
+                archives = memory.archival_search(
+                    "alpha beta gamma workspace notes",
+                    k=5,
+                    kind="episode",
+                    source_thread=run_id,
+                )
+                recall = memory.recall_page(run_id, k=10)
+                report = traces.render_report(run_id)
+            finally:
+                memory.close()
+
+        self.assertEqual(final_state.status, "done")
+        self.assertGreaterEqual(final_state.scratch.get("memory_pages_written", 0), 1)
+        self.assertLessEqual(len(final_state.history), 1)
+        self.assertTrue(archives)
+        self.assertIn("Archived harness history summary", archives[0].memory.content)
+        self.assertGreater(len(recall), len(final_state.history))
+        self.assertIn("memory_paged", report)
+
+    def test_memory_hydrates_existing_thread_on_resume(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir)
+            thread_id = "thread-resume"
+            memory = Memory(path / "memory.db")
+            memory.recall_append(
+                thread_id,
+                "user",
+                "previous decision: continue with sqlite vec only",
+            )
+            memory.archival_add(
+                "episode",
+                "archived episode: sqlite vec was selected as the only vector backend",
+                source_thread=thread_id,
+            )
+            traces = TraceStore(path / "traces.db")
+            run_id = traces.start_run("continue sqlite vec implementation", temp_dir, thread_id)
+            state = HarnessState(
+                task="continue sqlite vec implementation",
+                workspace=temp_dir,
+                thread_id=thread_id,
+                run_id=run_id,
+            )
+            client = CapturingClient()
+            runtime = GraphRuntimeConfig(
+                memory=memory,
+                memory_paging=MemoryPagingConfig(
+                    max_history_tokens=1000,
+                    recall_limit=5,
+                    archival_limit=5,
+                ),
+            )
+            try:
+                graph = build_graph(Nodes(client, traces, runtime), backend="simple")
+                final_state = graph.invoke(state)
+                report = traces.render_report(run_id)
+            finally:
+                memory.close()
+
+        self.assertEqual(final_state.status, "done")
+        self.assertIn("previous decision", final_state.scratch["memory_context"])
+        self.assertIn("sqlite vec", final_state.scratch["memory_context"])
+        self.assertIn("Memory context", client.plan_prompt)
+        self.assertIn("memory_hydrated", report)
+
+    @unittest.skipIf(importlib.util.find_spec("langgraph") is None, "langgraph is not installed")
+    def test_langgraph_backend_runs_explicit_memory_nodes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir)
+            memory = Memory(path / "memory.db")
+            traces = TraceStore(path / "traces.db")
+            run_id = traces.start_run("langgraph memory paging alpha beta", temp_dir)
+            state = HarnessState(
+                task="langgraph memory paging alpha beta",
+                workspace=temp_dir,
+                thread_id=run_id,
+                run_id=run_id,
+            )
+            runtime = GraphRuntimeConfig(
+                memory=memory,
+                memory_paging=MemoryPagingConfig(
+                    max_history_tokens=8,
+                    preserve_recent_steps=1,
+                ),
+            )
+            try:
+                graph = build_graph(
+                    Nodes(LMClient(provider="stub"), traces, runtime),
+                    backend="langgraph",
+                )
+                final_state = graph.invoke(state)
+                archives = memory.archival_search(
+                    "langgraph memory paging alpha beta",
+                    k=3,
+                    kind="episode",
+                    source_thread=run_id,
+                )
+                report = traces.render_report(run_id)
+            finally:
+                memory.close()
+
+        self.assertEqual(final_state.status, "done")
+        self.assertTrue(archives)
+        self.assertIn("memory_hydrated", report)
+        self.assertIn("memory_paged", report)
 
     def test_langgraph_backend_optional_dependency_boundary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
