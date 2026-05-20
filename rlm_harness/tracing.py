@@ -66,6 +66,60 @@ class TraceStore:
                 (status, int(time.time()), run_id),
             )
 
+    def get_run(self, run_id: str) -> Optional[dict[str, Any]]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT run_id, thread_id, task, workspace, status, started_at, finished_at
+                FROM runs
+                WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def latest_run_for_thread(self, thread_id: str) -> Optional[dict[str, Any]]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT run_id, thread_id, task, workspace, status, started_at, finished_at
+                FROM runs
+                WHERE thread_id = ?
+                ORDER BY started_at DESC, run_id DESC
+                LIMIT 1
+                """,
+                (thread_id,),
+            ).fetchone()
+        return None if row is None else dict(row)
+
+    def list_runs(
+        self,
+        limit: int = 20,
+        thread_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        if thread_id:
+            query = """
+                SELECT run_id, thread_id, task, workspace, status, started_at, finished_at
+                FROM runs
+                WHERE thread_id = ?
+                ORDER BY started_at DESC, run_id DESC
+                LIMIT ?
+            """
+            params = (thread_id, limit)
+        else:
+            query = """
+                SELECT run_id, thread_id, task, workspace, status, started_at, finished_at
+                FROM runs
+                ORDER BY started_at DESC, run_id DESC
+                LIMIT ?
+            """
+            params = (limit,)
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
     def event(
         self,
         run_id: str,
@@ -90,7 +144,33 @@ class TraceStore:
             ).fetchall()
         return rows
 
+    def events(self, run_id: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": int(row["id"]),
+                "ts": int(row["ts"]),
+                "kind": str(row["kind"]),
+                "node": row["node"],
+                "payload": json.loads(row["payload_json"]),
+            }
+            for row in self.iter_events(run_id)
+        ]
+
+    def run_summary(self, run_id: str) -> dict[str, Any]:
+        run = self.get_run(run_id)
+        if run is None:
+            raise KeyError(f"unknown run_id: {run_id}")
+        events = self.events(run_id)
+        final_answer = None
+        for event in reversed(events):
+            if event["kind"] == "final":
+                final_answer = event["payload"].get("final_answer")
+                break
+        return {**run, "event_count": len(events), "final_answer": final_answer}
+
     def render_report(self, run_id: str) -> str:
+        if self.get_run(run_id) is None:
+            raise KeyError(f"unknown run_id: {run_id}")
         lines = [f"Trace report: {run_id}"]
         for row in self.iter_events(run_id):
             payload = json.loads(row["payload_json"])

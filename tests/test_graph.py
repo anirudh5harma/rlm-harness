@@ -87,6 +87,10 @@ class GraphTests(unittest.TestCase):
         code = parse_python_action('{"type": "python", "code": "print(2 + 2)"}')
         self.assertEqual(code, "print(2 + 2)")
 
+    def test_parse_python_action_accepts_fenced_json(self):
+        code = parse_python_action('```json\n{"type": "python", "code": "print(7)"}\n```')
+        self.assertEqual(code, "print(7)")
+
     def test_stub_graph_reaches_done(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             traces = TraceStore(Path(temp_dir) / "traces.db")
@@ -234,6 +238,40 @@ class GraphTests(unittest.TestCase):
         self.assertTrue(archives)
         self.assertIn("memory_hydrated", report)
         self.assertIn("memory_paged", report)
+
+    @unittest.skipIf(importlib.util.find_spec("langgraph") is None, "langgraph is not installed")
+    @unittest.skipIf(
+        importlib.util.find_spec("langgraph.checkpoint.sqlite") is None,
+        "langgraph SQLite checkpointer is not installed",
+    )
+    def test_langgraph_backend_writes_sqlite_checkpoints(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir)
+            traces = TraceStore(path / "traces.db")
+            run_id = traces.start_run("checkpoint graph", temp_dir)
+            state = HarnessState(
+                task="checkpoint graph",
+                workspace=temp_dir,
+                thread_id="checkpoint-thread",
+                run_id=run_id,
+            )
+            graph = build_graph(
+                Nodes(LMClient(provider="stub"), traces),
+                backend="langgraph",
+                checkpoint_path=path / "checkpoints.db",
+            )
+            try:
+                final_state = graph.invoke(state)
+            finally:
+                graph.close()
+
+            import sqlite3
+
+            with sqlite3.connect(path / "checkpoints.db") as connection:
+                count = connection.execute("SELECT count(*) FROM checkpoints").fetchone()[0]
+
+        self.assertEqual(final_state.status, "done")
+        self.assertGreater(count, 0)
 
     def test_langgraph_backend_optional_dependency_boundary(self):
         with tempfile.TemporaryDirectory() as temp_dir:

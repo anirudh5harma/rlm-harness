@@ -9,7 +9,7 @@ setup(
     install_requires=["pydantic>=2", "sqlite-vec>=0.1"],
     extras_require={
         "dev": ["pytest>=8", "ruff>=0.6"],
-        "graph": ["langgraph>=0.2"],
+        "graph": ["langgraph>=0.2", "langgraph-checkpoint-sqlite>=3.1"],
         "memory": ["sentence-transformers>=3"],
         "mlx": ["mlx-lm"],
     },

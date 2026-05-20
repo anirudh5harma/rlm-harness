@@ -44,13 +44,7 @@ def parse_numbered_plan(text: str) -> list[str]:
 
 
 def parse_python_action(text: str) -> str:
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ActionParseError("action was not valid JSON") from exc
-
-    if not isinstance(payload, dict):
-        raise ActionParseError("action must be a JSON object")
+    payload = parse_action_payload(text)
     if payload.get("type") != "python":
         raise ActionParseError("action type must be 'python'")
 
@@ -58,6 +52,38 @@ def parse_python_action(text: str) -> str:
     if not isinstance(code, str) or not code.strip():
         raise ActionParseError("action code must be a non-empty string")
     return code
+
+
+def parse_action_payload(text: str) -> dict:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        payload = parse_embedded_json_object(text, exc)
+
+    if not isinstance(payload, dict):
+        raise ActionParseError("action must be a JSON object")
+    return payload
+
+
+def parse_embedded_json_object(text: str, original: json.JSONDecodeError) -> dict:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if len(lines) >= 3 and lines[-1].strip() == "```":
+            inner = "\n".join(lines[1:-1]).strip()
+            try:
+                return json.loads(inner)
+            except json.JSONDecodeError:
+                pass
+
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            return json.loads(stripped[start : end + 1])
+        except json.JSONDecodeError:
+            pass
+    raise ActionParseError("action was not valid JSON") from original
 
 
 def render_observation(payload: dict) -> str:
@@ -117,7 +143,7 @@ class Nodes:
 
     def act(self, state: HarnessState) -> HarnessState:
         if self.runtime.sandbox_enabled:
-            return self._act_with_sandbox(state)
+            return self._select_sandbox_action(state)
 
         messages = [
             Msg(
@@ -148,11 +174,9 @@ class Nodes:
         )
         return state
 
-    def _act_with_sandbox(self, state: HarnessState) -> HarnessState:
-        code = ""
+    def _select_sandbox_action(self, state: HarnessState) -> HarnessState:
         action_content = ""
         parse_error = ""
-        completion = None
 
         for attempt in range(self.runtime.max_action_retries + 1):
             messages = self._action_messages(state, parse_error=parse_error)
@@ -172,6 +196,9 @@ class Nodes:
             )
             try:
                 code = parse_python_action(completion.content)
+                state.scratch["pending_action_code"] = code
+                state.scratch["pending_action_content"] = completion.content
+                state.history.append({"node": "act", "content": completion.content})
                 break
             except ActionParseError as exc:
                 parse_error = str(exc)
@@ -191,6 +218,11 @@ class Nodes:
             rendered = render_observation(observation)
             state.scratch["last_action"] = rendered
             state.history.append({"node": "act", "content": rendered})
+        return state
+
+    def execute_action(self, state: HarnessState) -> HarnessState:
+        code = state.scratch.pop("pending_action_code", None)
+        if not code:
             return state
 
         sandbox_config = self.runtime.sandbox_config or SandboxConfig(
@@ -228,12 +260,12 @@ class Nodes:
 
         rendered = render_observation(observation)
         state.scratch["last_action"] = rendered
-        state.history.append({"node": "act", "content": rendered})
+        state.history.append({"node": "execute_action", "content": rendered})
         self.traces.event(
             state.run_id,
             "sandbox_execution",
             observation,
-            node="act",
+            node="execute_action",
         )
         return state
 

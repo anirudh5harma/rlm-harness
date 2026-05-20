@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import shutil
 import statistics
+import subprocess
 import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
+from typing import Optional
 
 from rlm_harness.graph.build import build_graph
 from rlm_harness.graph.nodes import GraphRuntimeConfig, Nodes
@@ -16,6 +20,17 @@ from rlm_harness.model_server import MLXServer, MLXServerConfig, MLXServerError
 from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, SandboxError
 from rlm_harness.tracing import TraceStore
 from rlm_harness.types import HarnessState, Msg
+
+PUBLIC_COMMANDS = {"run", "resume", "trace", "doctor"}
+INTERNAL_COMMANDS = {
+    "langgraph-plan",
+    "benchmark-model",
+    "check-model",
+    "serve-mlx",
+    "mem",
+    "sandbox",
+}
+ALL_COMMANDS = PUBLIC_COMMANDS | INTERNAL_COMMANDS
 
 
 def default_trace_path() -> Path:
@@ -36,14 +51,69 @@ def build_client(args: argparse.Namespace) -> LMClient:
     )
 
 
+def build_runtime(
+    args: argparse.Namespace,
+    workspace: Path,
+    memory: Optional[Memory],
+) -> GraphRuntimeConfig:
+    return GraphRuntimeConfig(
+        sandbox_enabled=not args.no_sandbox,
+        sandbox_config=SandboxConfig(
+            image=args.sandbox_image,
+            workspace=workspace,
+            memory=args.sandbox_memory,
+            cpus=args.sandbox_cpus,
+            default_timeout_s=args.sandbox_timeout,
+        ),
+        subcall_config=RLMSubcallConfig(
+            max_depth=args.max_depth,
+            max_subcalls=args.max_subcalls,
+            token_budget=args.token_budget,
+            max_tokens=args.subcall_max_tokens,
+        ),
+        max_action_retries=args.max_action_retries,
+        memory=memory,
+        memory_paging=MemoryPagingConfig(
+            max_history_tokens=args.max_history_tokens,
+            preserve_recent_steps=args.preserve_recent_steps,
+            recall_limit=args.recall_limit,
+            archival_limit=args.archival_limit,
+            summary_max_tokens=args.summary_max_tokens,
+        ),
+    )
+
+
 def cmd_run(args: argparse.Namespace) -> int:
-    workspace = Path(args.workspace).resolve()
+    return run_task(args, args.task, args.thread_id, Path(args.workspace).resolve())
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
     traces = TraceStore(Path(args.trace_db))
-    run_id = traces.start_run(args.task, str(workspace), thread_id=args.thread_id)
+    previous = traces.latest_run_for_thread(args.thread_id)
+    if previous is None and args.task is None:
+        print(
+            f"Cannot resume {args.thread_id}: no previous run in {args.trace_db}",
+            file=sys.stderr,
+        )
+        return 1
+    task = args.task or str(previous["task"])
+    workspace_value = args.workspace or (previous["workspace"] if previous else ".")
+    workspace = Path(workspace_value).resolve()
+    return run_task(args, task, args.thread_id, workspace)
+
+
+def run_task(
+    args: argparse.Namespace,
+    task: str,
+    thread_id: Optional[str],
+    workspace: Path,
+) -> int:
+    traces = TraceStore(Path(args.trace_db))
+    run_id = traces.start_run(task, str(workspace), thread_id=thread_id)
     state = HarnessState(
-        task=args.task,
+        task=task,
         workspace=str(workspace),
-        thread_id=args.thread_id or run_id,
+        thread_id=thread_id or run_id,
         run_id=run_id,
         token_budget=args.token_budget,
     )
@@ -51,7 +121,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         run_id,
         "run_started",
         {
-            "task": args.task,
+            "task": task,
             "workspace": str(workspace),
             "sandbox_enabled": not args.no_sandbox,
             "memory_enabled": not args.no_memory,
@@ -60,53 +130,192 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
 
     try:
-        memory_context = (
-            nullcontext(None) if args.no_memory else Memory(Path(args.memory_db))
-        )
+        memory_context = nullcontext(None) if args.no_memory else Memory(Path(args.memory_db))
         with memory_context as memory:
-            runtime = GraphRuntimeConfig(
-                sandbox_enabled=not args.no_sandbox,
-                sandbox_config=SandboxConfig(
-                    image=args.sandbox_image,
-                    workspace=workspace,
-                    memory=args.sandbox_memory,
-                    cpus=args.sandbox_cpus,
-                    default_timeout_s=args.sandbox_timeout,
-                ),
-                subcall_config=RLMSubcallConfig(
-                    max_depth=args.max_depth,
-                    max_subcalls=args.max_subcalls,
-                    token_budget=args.token_budget,
-                    max_tokens=args.subcall_max_tokens,
-                ),
-                max_action_retries=args.max_action_retries,
-                memory=memory,
-                memory_paging=MemoryPagingConfig(
-                    max_history_tokens=args.max_history_tokens,
-                    preserve_recent_steps=args.preserve_recent_steps,
-                    recall_limit=args.recall_limit,
-                    archival_limit=args.archival_limit,
-                    summary_max_tokens=args.summary_max_tokens,
-                ),
-            )
+            runtime = build_runtime(args, workspace, memory)
             graph = build_graph(
                 Nodes(build_client(args), traces, runtime),
                 backend=args.graph_backend,
+                checkpoint_path=checkpoint_path(args),
             )
-            final_state = graph.invoke(state)
+            if args.stream:
+                final_state = run_streaming_graph(graph, state)
+            else:
+                final_state = graph.invoke(state)
+            close_graph(graph)
         traces.finish_run(run_id, final_state.status)
     except (LMClientError, MemoryError, SandboxError) as exc:
         traces.event(run_id, "error", {"message": str(exc)}, node="cli")
         traces.finish_run(run_id, "error")
-        print(f"Run failed: {exc}", file=sys.stderr)
-        print(traces.render_report(run_id))
+        emit_run_output(args, None, traces, run_id, error=str(exc))
         return 1
 
-    if final_state.final_answer:
-        print(final_state.final_answer)
-    print()
-    print(traces.render_report(run_id))
+    emit_run_output(args, final_state, traces, run_id)
     return 0 if final_state.status == "done" else 1
+
+
+def emit_run_output(
+    args: argparse.Namespace,
+    final_state: Optional[HarnessState],
+    traces: TraceStore,
+    run_id: str,
+    error: Optional[str] = None,
+) -> None:
+    if args.json_output:
+        payload = traces.run_summary(run_id)
+        if error:
+            payload["error"] = error
+        print(json.dumps(payload, sort_keys=True))
+        return
+    if error:
+        print(f"Run failed: {error}", file=sys.stderr)
+        if not args.quiet:
+            print(traces.render_report(run_id))
+        return
+    if final_state and final_state.final_answer:
+        print(final_state.final_answer)
+    if not args.quiet:
+        print()
+        print(traces.render_report(run_id))
+
+
+def checkpoint_path(args: argparse.Namespace) -> Optional[Path]:
+    if args.no_checkpoint or args.graph_backend == "simple":
+        return None
+    return Path(args.checkpoint_db)
+
+
+def run_streaming_graph(graph, state: HarnessState) -> HarnessState:
+    if not hasattr(graph, "stream"):
+        return graph.invoke(state)
+    final_state = None
+    for update in graph.stream(state):
+        print(json.dumps({"graph_update": update}, default=str, sort_keys=True))
+        if isinstance(update, dict):
+            for value in update.values():
+                if isinstance(value, HarnessState):
+                    final_state = value
+                elif isinstance(value, dict):
+                    final_state = HarnessState.model_validate(value)
+    return final_state or graph.invoke(state)
+
+
+def close_graph(graph) -> None:
+    close = getattr(graph, "close", None)
+    if callable(close):
+        close()
+
+
+def cmd_trace_list(args: argparse.Namespace) -> int:
+    traces = TraceStore(Path(args.trace_db))
+    try:
+        runs = traces.list_runs(limit=args.limit, thread_id=args.thread_id)
+    except ValueError as exc:
+        print(f"Trace command failed: {exc}", file=sys.stderr)
+        return 1
+    if args.json_output:
+        print(json.dumps(runs, sort_keys=True))
+        return 0
+    for run in runs:
+        print(
+            "{run_id}\t{thread_id}\t{status}\t{started_at}\t{task}".format(**run)
+        )
+    return 0
+
+
+def cmd_trace_report(args: argparse.Namespace) -> int:
+    traces = TraceStore(Path(args.trace_db))
+    try:
+        if args.json_output:
+            print(json.dumps(traces.run_summary(args.run_id), sort_keys=True))
+        else:
+            print(traces.render_report(args.run_id))
+    except KeyError as exc:
+        print(f"Trace command failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_trace_events(args: argparse.Namespace) -> int:
+    traces = TraceStore(Path(args.trace_db))
+    events = traces.events(args.run_id)
+    if args.json_output:
+        print(json.dumps(events, sort_keys=True))
+    else:
+        for event in events:
+            print(
+                "[{kind}] {node} {payload}".format(
+                    kind=event["kind"],
+                    node=event["node"] or "-",
+                    payload=json.dumps(event["payload"], sort_keys=True),
+                )
+            )
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    checks = {
+        "python": sys.version.split()[0],
+        "docker_cli": "ok" if shutil.which("docker") else "missing",
+        "langgraph": module_status("langgraph"),
+        "sqlite_vec": module_status("sqlite_vec"),
+    }
+    if shutil.which("docker"):
+        completed = subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        checks["docker_daemon"] = (
+            completed.stdout.strip() if completed.returncode == 0 else "unavailable"
+        )
+    if args.json_output:
+        print(json.dumps(checks, sort_keys=True))
+    else:
+        for name, value in checks.items():
+            print(f"{name}\t{value}")
+    failing = {"missing", "unavailable"}
+    return 0 if all(value not in failing for value in checks.values()) else 1
+
+
+def module_status(module: str) -> str:
+    try:
+        __import__(module)
+    except ImportError:
+        return "missing"
+    return "ok"
+
+
+def cmd_langgraph_plan(args: argparse.Namespace) -> int:
+    scopes = [
+        {
+            "scope": "durable_checkpoints",
+            "status": module_status("langgraph.checkpoint.sqlite"),
+            "next": "Enabled for LangGraph runs via --checkpoint-db.",
+        },
+        {
+            "scope": "state_reducers",
+            "status": "open",
+            "next": "Optional: migrate HarnessState to a TypedDict with annotated reducers.",
+        },
+        {
+            "scope": "tool_nodes",
+            "status": "partial",
+            "next": "Action execution is a graph node; LangGraph ToolNode remains optional.",
+        },
+        {
+            "scope": "streaming_observability",
+            "status": "ok",
+            "next": "Use --stream with LangGraph backend.",
+        },
+    ]
+    if args.json_output:
+        print(json.dumps(scopes, sort_keys=True))
+    else:
+        for item in scopes:
+            print(f"{item['scope']}\t{item['status']}\t{item['next']}")
+    return 0
 
 
 def cmd_benchmark_model(args: argparse.Namespace) -> int:
@@ -306,55 +515,213 @@ def cmd_sandbox_run(args: argparse.Namespace) -> int:
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(prog="rlm-harness")
-    subparsers = root.add_subparsers(dest="command", required=True)
+    root = argparse.ArgumentParser(
+        prog="rlm-harness",
+        description='Local recursive coding-agent harness. Run a task with: rlm-harness "task"',
+    )
+    subparsers = root.add_subparsers(
+        dest="command",
+        metavar="{run,resume,trace,doctor}",
+        required=True,
+    )
 
-    def add_model_args(command: argparse.ArgumentParser, include_timeout: bool = True) -> None:
-        command.add_argument("--provider", default="stub", choices=["stub", "openai-compatible"])
-        command.add_argument("--model", default="stub")
-        command.add_argument("--base-url", default="http://127.0.0.1:8080/v1")
-        command.add_argument("--api-key", default=None)
+    def add_model_args(
+        command: argparse.ArgumentParser,
+        include_timeout: bool = True,
+        public: bool = False,
+    ) -> None:
+        command.add_argument(
+            "--provider",
+            default="stub",
+            choices=["stub", "openai-compatible"],
+            help="Model provider." if public else argparse.SUPPRESS,
+        )
+        command.add_argument(
+            "--model",
+            default="stub",
+            help="Model name sent to the provider." if public else argparse.SUPPRESS,
+        )
+        command.add_argument(
+            "--base-url",
+            default="http://127.0.0.1:8080/v1",
+            help=argparse.SUPPRESS,
+        )
+        command.add_argument("--api-key", default=None, help=argparse.SUPPRESS)
         if include_timeout:
-            command.add_argument("--timeout", type=int, default=120)
+            command.add_argument(
+                "--timeout",
+                type=int,
+                default=120,
+                help=argparse.SUPPRESS,
+            )
 
-    run = subparsers.add_parser("run")
+    def add_run_args(
+        command: argparse.ArgumentParser,
+        workspace_default: Optional[str] = ".",
+        include_thread_id: bool = True,
+    ) -> None:
+        command.add_argument("--workspace", default=workspace_default, help="Workspace path.")
+        command.add_argument(
+            "--trace-db",
+            default=str(default_trace_path()),
+            help=argparse.SUPPRESS,
+        )
+        command.add_argument("--json", dest="json_output", action="store_true", help="Emit JSON.")
+        command.add_argument("--quiet", action="store_true", help="Suppress trace report output.")
+        command.add_argument("--stream", action="store_true", help="Print LangGraph update events.")
+        if include_thread_id:
+            command.add_argument(
+                "--thread-id",
+                default=None,
+                help="Thread id for memory continuity.",
+            )
+        command.add_argument(
+            "--memory-db",
+            default=str(default_memory_path()),
+            help=argparse.SUPPRESS,
+        )
+        command.add_argument("--no-memory", action="store_true", help=argparse.SUPPRESS)
+        command.add_argument(
+            "--max-history-tokens",
+            type=int,
+            default=1600,
+            help=argparse.SUPPRESS,
+        )
+        command.add_argument(
+            "--preserve-recent-steps",
+            type=int,
+            default=4,
+            help=argparse.SUPPRESS,
+        )
+        command.add_argument("--recall-limit", type=int, default=6, help=argparse.SUPPRESS)
+        command.add_argument(
+            "--archival-limit",
+            type=int,
+            default=3,
+            help=argparse.SUPPRESS,
+        )
+        command.add_argument(
+            "--summary-max-tokens",
+            type=int,
+            default=300,
+            help=argparse.SUPPRESS,
+        )
+        command.add_argument(
+            "--token-budget",
+            type=int,
+            default=100000,
+            help=argparse.SUPPRESS,
+        )
+        command.add_argument(
+            "--graph-backend",
+            default="auto",
+            choices=["auto", "simple", "langgraph"],
+            help=argparse.SUPPRESS,
+        )
+        command.add_argument(
+            "--checkpoint-db",
+            default=".rlm_harness/checkpoints.db",
+            help=argparse.SUPPRESS,
+        )
+        command.add_argument(
+            "--no-checkpoint",
+            action="store_true",
+            help=argparse.SUPPRESS,
+        )
+        command.add_argument("--no-sandbox", action="store_true", help=argparse.SUPPRESS)
+        command.add_argument(
+            "--sandbox-image",
+            default="rlm-harness-sandbox:latest",
+            help=argparse.SUPPRESS,
+        )
+        command.add_argument("--sandbox-memory", default="512m", help=argparse.SUPPRESS)
+        command.add_argument("--sandbox-cpus", type=float, default=1.0, help=argparse.SUPPRESS)
+        command.add_argument(
+            "--sandbox-timeout",
+            type=float,
+            default=60,
+            help=argparse.SUPPRESS,
+        )
+        command.add_argument(
+            "--max-depth",
+            type=int,
+            default=3,
+            help=argparse.SUPPRESS,
+        )
+        command.add_argument(
+            "--max-subcalls",
+            type=int,
+            default=32,
+            help=argparse.SUPPRESS,
+        )
+        command.add_argument(
+            "--subcall-max-tokens",
+            type=int,
+            default=512,
+            help=argparse.SUPPRESS,
+        )
+        command.add_argument(
+            "--max-action-retries",
+            type=int,
+            default=1,
+            help=argparse.SUPPRESS,
+        )
+        add_model_args(command, public=True)
+
+    run = subparsers.add_parser("run", help="Run a task.")
     run.add_argument("task")
-    run.add_argument("--workspace", default=".")
-    run.add_argument("--trace-db", default=str(default_trace_path()))
-    run.add_argument("--thread-id", default=None)
-    run.add_argument("--memory-db", default=str(default_memory_path()))
-    run.add_argument("--no-memory", action="store_true")
-    run.add_argument("--max-history-tokens", type=int, default=1600)
-    run.add_argument("--preserve-recent-steps", type=int, default=4)
-    run.add_argument("--recall-limit", type=int, default=6)
-    run.add_argument("--archival-limit", type=int, default=3)
-    run.add_argument("--summary-max-tokens", type=int, default=300)
-    run.add_argument("--token-budget", type=int, default=100000)
-    run.add_argument("--graph-backend", default="auto", choices=["auto", "simple", "langgraph"])
-    run.add_argument("--no-sandbox", action="store_true")
-    run.add_argument("--sandbox-image", default="rlm-harness-sandbox:latest")
-    run.add_argument("--sandbox-memory", default="512m")
-    run.add_argument("--sandbox-cpus", type=float, default=1.0)
-    run.add_argument("--sandbox-timeout", type=float, default=60)
-    run.add_argument("--max-depth", type=int, default=3)
-    run.add_argument("--max-subcalls", type=int, default=32)
-    run.add_argument("--subcall-max-tokens", type=int, default=512)
-    run.add_argument("--max-action-retries", type=int, default=1)
-    add_model_args(run)
+    add_run_args(run)
     run.set_defaults(func=cmd_run)
 
-    benchmark = subparsers.add_parser("benchmark-model")
+    resume = subparsers.add_parser("resume", help="Resume a thread.")
+    resume.add_argument("thread_id")
+    resume.add_argument("task", nargs="?")
+    add_run_args(resume, workspace_default=None, include_thread_id=False)
+    resume.set_defaults(func=cmd_resume)
+
+    trace = subparsers.add_parser("trace", help="Inspect traces.")
+    trace.add_argument("--trace-db", default=str(default_trace_path()))
+    trace_subparsers = trace.add_subparsers(dest="trace_command", required=True)
+
+    trace_list = trace_subparsers.add_parser("list")
+    trace_list.add_argument("--limit", type=int, default=20)
+    trace_list.add_argument("--thread-id", default=None)
+    trace_list.add_argument("--json", dest="json_output", action="store_true")
+    trace_list.set_defaults(func=cmd_trace_list)
+
+    trace_report = trace_subparsers.add_parser("report")
+    trace_report.add_argument("run_id")
+    trace_report.add_argument("--json", dest="json_output", action="store_true")
+    trace_report.set_defaults(func=cmd_trace_report)
+
+    trace_events = trace_subparsers.add_parser("events")
+    trace_events.add_argument("run_id")
+    trace_events.add_argument("--json", dest="json_output", action="store_true")
+    trace_events.set_defaults(func=cmd_trace_events)
+
+    doctor = subparsers.add_parser("doctor", help="Check local setup.")
+    doctor.add_argument("--json", dest="json_output", action="store_true")
+    doctor.set_defaults(func=cmd_doctor)
+
+    langgraph_plan = subparsers.add_parser(
+        "langgraph-plan",
+        help=argparse.SUPPRESS,
+    )
+    langgraph_plan.add_argument("--json", dest="json_output", action="store_true")
+    langgraph_plan.set_defaults(func=cmd_langgraph_plan)
+
+    benchmark = subparsers.add_parser("benchmark-model", help=argparse.SUPPRESS)
     benchmark.add_argument("--max-tokens", type=int, default=300)
     add_model_args(benchmark)
     benchmark.set_defaults(func=cmd_benchmark_model)
 
-    check_model = subparsers.add_parser("check-model")
+    check_model = subparsers.add_parser("check-model", help=argparse.SUPPRESS)
     check_model.add_argument("--prompt", default="Reply with exactly: hello")
     check_model.add_argument("--max-tokens", type=int, default=64)
     add_model_args(check_model)
     check_model.set_defaults(func=cmd_check_model)
 
-    serve_mlx = subparsers.add_parser("serve-mlx")
+    serve_mlx = subparsers.add_parser("serve-mlx", help=argparse.SUPPRESS)
     serve_mlx.add_argument(
         "--model",
         default="mlx-community/Qwen2.5-Coder-3B-Instruct-4bit",
@@ -371,7 +738,7 @@ def parser() -> argparse.ArgumentParser:
     )
     serve_mlx.set_defaults(func=cmd_serve_mlx)
 
-    mem = subparsers.add_parser("mem")
+    mem = subparsers.add_parser("mem", help=argparse.SUPPRESS)
     mem.add_argument("--memory-db", default=str(default_memory_path()))
     mem_subparsers = mem.add_subparsers(dest="mem_command", required=True)
 
@@ -409,7 +776,7 @@ def parser() -> argparse.ArgumentParser:
     mem_search.add_argument("--limit", type=int, default=5)
     mem_search.set_defaults(func=cmd_mem_search)
 
-    sandbox = subparsers.add_parser("sandbox")
+    sandbox = subparsers.add_parser("sandbox", help=argparse.SUPPRESS)
     sandbox_subparsers = sandbox.add_subparsers(dest="sandbox_command", required=True)
 
     sandbox_build = sandbox_subparsers.add_parser("build")
@@ -432,12 +799,33 @@ def parser() -> argparse.ArgumentParser:
     sandbox_run.add_argument("--model-timeout", dest="timeout", type=int, default=120)
     add_model_args(sandbox_run, include_timeout=False)
     sandbox_run.set_defaults(func=cmd_sandbox_run)
+
+    subparsers._choices_actions = [  # type: ignore[attr-defined]
+        action
+        for action in subparsers._choices_actions  # type: ignore[attr-defined]
+        if action.dest in PUBLIC_COMMANDS
+    ]
     return root
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parser().parse_args(argv)
+    argv = normalize_argv(argv)
+    command_parser = parser()
+    if argv == []:
+        command_parser.print_help()
+        return 0
+    args = command_parser.parse_args(argv)
     return args.func(args)
+
+
+def normalize_argv(argv: list[str] | None) -> list[str]:
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:
+        return argv
+    if argv[0] in ALL_COMMANDS or argv[0].startswith("-"):
+        return argv
+    return ["run", *argv]
 
 
 if __name__ == "__main__":
