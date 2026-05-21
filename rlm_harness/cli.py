@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
-import os
+import shlex
 import shutil
 import statistics
 import subprocess
@@ -12,6 +13,17 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
 
+from rlm_harness.config import (
+    CONFIG_PATH,
+    default_api_key,
+    default_base_url,
+    default_memory_path,
+    default_model,
+    default_provider,
+    default_trace_path,
+    masked_secret,
+    save_user_config,
+)
 from rlm_harness.graph.build import build_graph
 from rlm_harness.graph.nodes import GraphRuntimeConfig, Nodes
 from rlm_harness.memory import Memory, MemoryError, MemoryPagingConfig
@@ -21,7 +33,7 @@ from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, San
 from rlm_harness.tracing import TraceStore
 from rlm_harness.types import HarnessState, Msg
 
-PUBLIC_COMMANDS = {"run", "resume", "trace", "doctor"}
+PUBLIC_COMMANDS = {"run", "resume", "trace", "doctor", "model", "provider", "config"}
 INTERNAL_COMMANDS = {
     "langgraph-plan",
     "benchmark-model",
@@ -31,14 +43,7 @@ INTERNAL_COMMANDS = {
     "sandbox",
 }
 ALL_COMMANDS = PUBLIC_COMMANDS | INTERNAL_COMMANDS
-
-
-def default_trace_path() -> Path:
-    return Path(os.environ.get("RLM_HARNESS_TRACE_DB", ".rlm_harness/traces.db"))
-
-
-def default_memory_path() -> Path:
-    return Path(os.environ.get("RLM_HARNESS_MEMORY_DB", ".rlm_harness/memory.db"))
+DEFAULT_PROG = "harness"
 
 
 def build_client(args: argparse.Namespace) -> LMClient:
@@ -46,7 +51,7 @@ def build_client(args: argparse.Namespace) -> LMClient:
         provider=args.provider,
         model=args.model,
         base_url=args.base_url,
-        api_key=args.api_key or os.environ.get("OPENROUTER_API_KEY"),
+        api_key=args.api_key or default_api_key(),
         timeout_s=args.timeout,
     )
 
@@ -277,6 +282,7 @@ def cmd_trace_events(args: argparse.Namespace) -> int:
 def cmd_doctor(args: argparse.Namespace) -> int:
     checks = {
         "python": sys.version.split()[0],
+        "harness_cli": shutil.which("harness") or "not installed as command yet",
         "docker_cli": "ok" if shutil.which("docker") else "missing",
         "langgraph": module_status("langgraph"),
         "sqlite_vec": module_status("sqlite_vec"),
@@ -306,6 +312,70 @@ def module_status(module: str) -> str:
     except ImportError:
         return "missing"
     return "ok"
+
+
+def current_config_payload() -> dict[str, str]:
+    return {
+        "provider": default_provider(),
+        "model": default_model(),
+        "base_url": default_base_url(),
+        "api_key": masked_secret(default_api_key()),
+        "config_path": str(CONFIG_PATH),
+    }
+
+
+def print_current_config() -> None:
+    config = current_config_payload()
+    print(f"provider\t{config['provider']}")
+    print(f"model\t{config['model']}")
+    print(f"base_url\t{config['base_url']}")
+    print(f"api_key\t{config['api_key']}")
+    print(f"config\t{config['config_path']}")
+
+
+def cmd_config(args: argparse.Namespace) -> int:
+    if args.json_output:
+        print(json.dumps(current_config_payload(), sort_keys=True))
+    else:
+        print_current_config()
+    return 0
+
+
+def cmd_model(args: argparse.Namespace) -> int:
+    if not args.model:
+        print(default_model())
+        return 0
+    save_user_config({"model": args.model})
+    print(f"model set to {args.model}")
+    return 0
+
+
+def cmd_provider(args: argparse.Namespace) -> int:
+    if not args.provider:
+        print(f"provider\t{default_provider()}")
+        print(f"base_url\t{default_base_url()}")
+        print(f"api_key\t{masked_secret(default_api_key())}")
+        return 0
+
+    updates = {"provider": args.provider}
+    if args.base_url:
+        updates["base_url"] = args.base_url
+    if args.api_key:
+        updates["api_key"] = args.api_key
+    elif args.provider == "openai-compatible" and args.prompt_key and sys.stdin.isatty():
+        entered = getpass.getpass("API key: ").strip()
+        if entered:
+            updates["api_key"] = entered
+
+    save_user_config(updates)
+    print(f"provider set to {args.provider}")
+    if updates.get("base_url"):
+        print(f"base_url set to {updates['base_url']}")
+    if updates.get("api_key"):
+        print("api_key saved")
+    elif args.provider == "openai-compatible" and not default_api_key():
+        print("api_key not set; run: harness /provider openai-compatible --api-key <key>")
+    return 0
 
 
 def cmd_langgraph_plan(args: argparse.Namespace) -> int:
@@ -537,12 +607,15 @@ def cmd_sandbox_run(args: argparse.Namespace) -> int:
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
-        prog="rlm-harness",
-        description='Local recursive coding-agent harness. Run a task with: rlm-harness "task"',
+        prog=DEFAULT_PROG,
+        description=(
+            "Local recursive coding-agent harness. "
+            f'Run a task with: {DEFAULT_PROG} "fix tests"'
+        ),
     )
     subparsers = root.add_subparsers(
         dest="command",
-        metavar="{run,resume,trace,doctor}",
+        metavar="{run,resume,trace,doctor,model,provider,config}",
         required=True,
     )
 
@@ -553,18 +626,18 @@ def parser() -> argparse.ArgumentParser:
     ) -> None:
         command.add_argument(
             "--provider",
-            default="stub",
+            default=default_provider(),
             choices=["stub", "openai-compatible"],
-            help="Model provider." if public else argparse.SUPPRESS,
+            help="Model provider (stub or openai-compatible)." if public else argparse.SUPPRESS,
         )
         command.add_argument(
             "--model",
-            default="stub",
+            default=default_model(),
             help="Model name sent to the provider." if public else argparse.SUPPRESS,
         )
         command.add_argument(
             "--base-url",
-            default="http://127.0.0.1:8080/v1",
+            default=default_base_url(),
             help=argparse.SUPPRESS,
         )
         command.add_argument("--api-key", default=None, help=argparse.SUPPRESS)
@@ -730,6 +803,40 @@ def parser() -> argparse.ArgumentParser:
     doctor.add_argument("--json", dest="json_output", action="store_true")
     doctor.set_defaults(func=cmd_doctor)
 
+    model = subparsers.add_parser("model", help="Show or set the default model.")
+    model.add_argument("model", nargs="?", help="Model name, e.g. openai/gpt-4o-mini.")
+    model.set_defaults(func=cmd_model)
+
+    provider = subparsers.add_parser("provider", help="Show or set provider/API key.")
+    provider.add_argument(
+        "provider",
+        nargs="?",
+        choices=["stub", "openai-compatible"],
+        help="Provider to use.",
+    )
+    provider.add_argument(
+        "--api-key",
+        default=None,
+        help="API key to save in ~/.harness/config.json.",
+    )
+    provider.add_argument(
+        "--base-url",
+        default=None,
+        help="OpenAI-compatible base URL, e.g. https://openrouter.ai/api/v1.",
+    )
+    provider.add_argument(
+        "--no-prompt",
+        dest="prompt_key",
+        action="store_false",
+        default=True,
+        help="Do not prompt for an API key.",
+    )
+    provider.set_defaults(func=cmd_provider)
+
+    config_cmd = subparsers.add_parser("config", help="Show saved harness configuration.")
+    config_cmd.add_argument("--json", dest="json_output", action="store_true")
+    config_cmd.set_defaults(func=cmd_config)
+
     langgraph_plan = subparsers.add_parser(
         "langgraph-plan",
         help=argparse.SUPPRESS,
@@ -835,10 +942,48 @@ def parser() -> argparse.ArgumentParser:
     return root
 
 
+def interactive_loop() -> int:
+    print("Harness interactive mode. Type a coding task and press Enter. Type /help or /quit.")
+    print(f"Using provider={default_provider()} model={default_model()}")
+    print("Configure with /model <name> and /provider openai-compatible --api-key <key>.")
+    while True:
+        try:
+            task = input("harness> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not task:
+            continue
+        if task in {"/q", "/quit", "quit", "exit"}:
+            return 0
+        if task in {"/h", "/help", "help"}:
+            print("Tasks: type any natural-language coding task.")
+            print(
+                "Slash commands: /model [name], /provider [provider] [--api-key key], "
+                "/config, /doctor, /quit"
+            )
+            continue
+        if task.startswith("/"):
+            try:
+                slash_args = shlex.split(task[1:])
+            except ValueError as exc:
+                print(f"Invalid command: {exc}", file=sys.stderr)
+                continue
+            if not slash_args:
+                continue
+            exit_code = main(slash_args)
+        else:
+            exit_code = main([task])
+        if exit_code != 0:
+            print(f"Task exited with status {exit_code}", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = normalize_argv(argv)
     command_parser = parser()
     if argv == []:
+        if sys.stdin.isatty():
+            return interactive_loop()
         command_parser.print_help()
         return 0
     args = command_parser.parse_args(argv)
@@ -850,6 +995,8 @@ def normalize_argv(argv: list[str] | None) -> list[str]:
         argv = sys.argv[1:]
     if not argv:
         return argv
+    if argv[0].startswith("/") and len(argv[0]) > 1:
+        argv = [argv[0][1:], *argv[1:]]
     if argv[0] in ALL_COMMANDS or argv[0].startswith("-"):
         return argv
     return ["run", *argv]

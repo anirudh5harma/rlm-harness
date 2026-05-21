@@ -7,4 +7,3 @@ dist/
 build/
 *.egg-info/
 architecture.md
-readme.md

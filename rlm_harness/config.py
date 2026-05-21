@@ -1,0 +1,103 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+from typing import Any, Optional
+
+DEFAULT_MODEL = "Qwen/Qwen2.5-Coder-7B-Instruct"
+DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_PROVIDER = "stub"
+CONFIG_DIR = Path(os.environ.get("HARNESS_CONFIG_DIR", Path.home() / ".harness"))
+CONFIG_PATH = Path(os.environ.get("HARNESS_CONFIG", CONFIG_DIR / "config.json"))
+
+
+def env_first(*names: str, default: Optional[str] = None) -> Optional[str]:
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return default
+
+
+def load_user_config(path: Path | None = None) -> dict[str, Any]:
+    config_path = path or CONFIG_PATH
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_user_config(updates: dict[str, Any], path: Path | None = None) -> dict[str, Any]:
+    config_path = path or CONFIG_PATH
+    config = load_user_config(config_path)
+    config.update({key: value for key, value in updates.items() if value is not None})
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    try:
+        config_path.chmod(0o600)
+    except OSError:
+        pass
+    return config
+
+
+def default_provider() -> str:
+    configured = load_user_config().get("provider")
+    return (
+        env_first(
+            "HARNESS_PROVIDER",
+            "RLM_HARNESS_PROVIDER",
+            default=configured or DEFAULT_PROVIDER,
+        )
+        or DEFAULT_PROVIDER
+    )
+
+
+def default_model() -> str:
+    configured = load_user_config().get("model")
+    return (
+        env_first("HARNESS_MODEL", "RLM_HARNESS_MODEL", default=configured or DEFAULT_MODEL)
+        or DEFAULT_MODEL
+    )
+
+
+def default_base_url() -> str:
+    configured = load_user_config().get("base_url")
+    return env_first(
+        "HARNESS_BASE_URL",
+        "RLM_HARNESS_BASE_URL",
+        "OPENAI_BASE_URL",
+        default=configured or DEFAULT_BASE_URL,
+    ) or DEFAULT_BASE_URL
+
+
+def default_api_key() -> Optional[str]:
+    configured = load_user_config().get("api_key")
+    return env_first(
+        "HARNESS_API_KEY",
+        "RLM_HARNESS_API_KEY",
+        "OPENROUTER_API_KEY",
+        "OPENAI_API_KEY",
+        default=configured,
+    )
+
+
+def default_trace_path() -> Path:
+    return Path(os.environ.get("RLM_HARNESS_TRACE_DB", ".rlm_harness/traces.db"))
+
+
+def default_memory_path() -> Path:
+    return Path(os.environ.get("RLM_HARNESS_MEMORY_DB", ".rlm_harness/memory.db"))
+
+
+def masked_secret(value: Optional[str]) -> str:
+    if not value:
+        return "not set"
+    if len(value) <= 8:
+        return "***"
+    return f"{value[:4]}…{value[-4:]}"
