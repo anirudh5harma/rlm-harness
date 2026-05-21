@@ -9,6 +9,7 @@ BIN_DIR="$PREFIX/bin"
 VENV_DIR="$APP_DIR/venv"
 SRC_DIR="$APP_DIR/src"
 PYTHON_BIN="${PYTHON:-}"
+NO_PATH_UPDATE="${HARNESS_NO_PATH_UPDATE:-0}"
 
 say() { printf '%s\n' "$*"; }
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -33,6 +34,44 @@ pick_python() {
     fi
   done
   fail "Python 3.10 or newer is required. Set PYTHON=/path/to/python3.12 and retry."
+}
+
+path_contains_bin() {
+  case ":$PATH:" in
+    *":$BIN_DIR:"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+choose_profile() {
+  if [ -n "${PROFILE:-}" ]; then
+    printf '%s\n' "$PROFILE"
+  elif [ "${SHELL##*/}" = "zsh" ]; then
+    printf '%s\n' "$HOME/.zshrc"
+  elif [ "${SHELL##*/}" = "bash" ]; then
+    printf '%s\n' "$HOME/.bashrc"
+  else
+    printf '%s\n' "$HOME/.profile"
+  fi
+}
+
+ensure_path_hint() {
+  if path_contains_bin; then
+    return 0
+  fi
+  if [ "$NO_PATH_UPDATE" = "1" ]; then
+    return 0
+  fi
+  profile="$(choose_profile)"
+  mkdir -p "$(dirname "$profile")"
+  touch "$profile"
+  if ! grep -F "$BIN_DIR" "$profile" >/dev/null 2>&1; then
+    {
+      printf '\n# Harness installer\n'
+      printf 'export PATH="%s:$PATH"\n' "$BIN_DIR"
+    } >> "$profile"
+    say "Added $BIN_DIR to PATH in $profile"
+  fi
 }
 
 PYTHON_BIN="$(pick_python)"
@@ -72,6 +111,7 @@ cat > "$BIN_DIR/harness" <<EOF
 exec "$VENV_DIR/bin/harness" "\$@"
 EOF
 chmod +x "$BIN_DIR/harness"
+ensure_path_hint
 
 say ""
 say "Harness installed."
@@ -85,8 +125,8 @@ say "     harness /provider openai-compatible --api-key <your-key>"
 say "  3. Start in any directory:"
 say "     harness"
 say ""
-if command -v harness >/dev/null 2>&1; then
-  harness doctor || true
+if path_contains_bin; then
+  "$BIN_DIR/harness" doctor || true
 else
-  say "Open a new shell or add $BIN_DIR to PATH, then run: harness doctor"
+  say "Open a new shell or run the export above, then run: harness doctor"
 fi

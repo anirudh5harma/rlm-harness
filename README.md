@@ -12,7 +12,7 @@ curl -fsSL https://raw.githubusercontent.com/anirudh5harma/rlm-harness/main/scri
 
 The installer creates an isolated app environment under `~/.local/share/harness` and links the global command at `~/.local/bin/harness`.
 
-If `~/.local/bin` is not already on your PATH:
+If `~/.local/bin` is not already on your PATH, the installer adds it to your shell profile and prints the one-line export you can run immediately:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
