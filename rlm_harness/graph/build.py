@@ -9,9 +9,9 @@ from rlm_harness.types import HarnessState
 
 
 class HarnessGraph:
-    def __init__(self, nodes: Nodes, max_loops: int = 3):
+    def __init__(self, nodes: Nodes, max_loops: Optional[int] = None):
         self.nodes = nodes
-        self.max_loops = max_loops
+        self.max_loops = max_loops or nodes.runtime.max_iterations
 
     def invoke(self, state: HarnessState) -> HarnessState:
         state = self.nodes.memory_read(state)
@@ -30,9 +30,11 @@ class HarnessGraph:
             state = self.nodes.memory_write(state)
             if state.status == "done":
                 return self.nodes.done(state)
-            if state.status == "error":
+            if state.status in {"error", "stopped"}:
                 return state
         state.status = "stopped"
+        if state.final_answer is None:
+            state.final_answer = "Stopped before the task reached a completed state."
         return state
 
 
@@ -102,8 +104,8 @@ def _build_langgraph(nodes: Nodes, checkpoint_path: Optional[Path] = None):
     graph.add_edge("reflect", "memory_after_reflect")
     graph.add_conditional_edges(
         "memory_after_reflect",
-        lambda state: state.status if state.status in {"done", "error"} else "act",
-        {"done": "done", "error": END, "act": "act"},
+        lambda state: state.status if state.status in {"done", "error", "stopped"} else "act",
+        {"done": "done", "error": END, "stopped": END, "act": "act"},
     )
     graph.add_edge("done", END)
     return LangGraphHarnessGraph(graph.compile(checkpointer=checkpointer), connection)

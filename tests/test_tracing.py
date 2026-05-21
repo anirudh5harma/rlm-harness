@@ -4,10 +4,12 @@ import io
 import json
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 
 from rlm_harness import cli
 from rlm_harness.tracing import TraceStore
+from rlm_harness.types import HarnessState
 
 
 class TraceStoreTests(unittest.TestCase):
@@ -91,6 +93,7 @@ class TraceStoreTests(unittest.TestCase):
                     ]
                 )
             payload = json.loads(stdout.getvalue())
+            output = stdout.getvalue()
 
             report_stdout = io.StringIO()
             with contextlib.redirect_stdout(report_stdout):
@@ -108,8 +111,57 @@ class TraceStoreTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(report_exit, 0)
+        self.assertTrue(output.startswith("{\n"))
         self.assertEqual(payload["status"], "done")
+        self.assertIn("Stub response", payload["response"])
         self.assertEqual(report["run_id"], payload["run_id"])
+
+    def test_cli_run_text_output_is_only_response(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            trace_db = str(Path(temp_dir) / "traces.db")
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = cli.main(
+                    [
+                        "run",
+                        "text output task",
+                        "--no-sandbox",
+                        "--no-memory",
+                        "--trace-db",
+                        trace_db,
+                    ]
+                )
+            output = stdout.getvalue()
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Stub response", output)
+        self.assertNotIn("Trace report", output)
+        self.assertNotIn("run_started", output)
+
+    def test_json_payload_uses_final_state_answer_for_error_runs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            trace_db = str(Path(temp_dir) / "traces.db")
+            traces = TraceStore(Path(trace_db))
+            run_id = traces.start_run("bad tool call", temp_dir)
+            traces.finish_run(run_id, "error")
+            state = HarnessState(
+                task="bad tool call",
+                workspace=temp_dir,
+                thread_id=run_id,
+                run_id=run_id,
+                status="error",
+                final_answer="ToolError: path must be a non-empty string",
+            )
+
+            payload = cli.run_output_payload(
+                Namespace(trace_db=trace_db),
+                traces,
+                run_id,
+                state,
+            )
+
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["response"], "ToolError: path must be a non-empty string")
 
     def test_cli_accepts_task_without_run_command(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -10,11 +10,15 @@ import traceback
 
 from rlm_shim import RLMBridge
 from sandbox_tools import (
+    ToolError,
     apply_patch,
     git_diff,
     git_log,
     git_status,
+    list_files,
+    project_overview,
     read_file,
+    read_first_existing,
     run_shell,
     search_code,
     tool_help,
@@ -47,6 +51,9 @@ def execute_cell(code: str, timeout_s: float, namespace: dict) -> dict:
         status = "timeout"
         timed_out = True
         stderr.write(f"Execution timed out after {timeout_s:g}s\n")
+    except ToolError as exc:
+        status = "tool_error"
+        stderr.write(f"ToolError: {exc}\n")
     except BaseException:
         status = "error"
         stderr.write(traceback.format_exc())
@@ -68,6 +75,9 @@ def main() -> int:
         "__name__": "__sandbox__",
         "rlm": RLMBridge(),
         "read_file": read_file,
+        "read_first_existing": read_first_existing,
+        "list_files": list_files,
+        "project_overview": project_overview,
         "write_file": write_file,
         "apply_patch": apply_patch,
         "run_shell": run_shell,

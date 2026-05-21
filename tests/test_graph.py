@@ -8,8 +8,11 @@ from rlm_harness.graph.build import build_graph
 from rlm_harness.graph.nodes import (
     GraphRuntimeConfig,
     Nodes,
+    final_answer_from_action,
+    normalize_user_output,
     parse_numbered_plan,
     parse_python_action,
+    render_observation,
 )
 from rlm_harness.memory import Memory, MemoryPagingConfig
 from rlm_harness.model_client import LMClient
@@ -63,6 +66,48 @@ class BadThenGoodActionClient(LMClient):
         )
 
 
+class ToolErrorThenGoodActionClient(LMClient):
+    def __init__(self):
+        super().__init__(provider="stub")
+        self.action_calls = 0
+
+    def complete(self, messages, max_tokens=512, temperature=0.2):
+        user_text = ""
+        for message in reversed(list(messages)):
+            if message.role == "user":
+                user_text = message.content
+                break
+
+        if "Return a concise numbered plan" in user_text:
+            content = "1. Inspect workspace\n2. Summarize project"
+        elif "Return only valid JSON" in user_text:
+            self.action_calls += 1
+            if self.action_calls == 1:
+                content = '{"type":"python","code":"print(read_file(None))"}'
+            else:
+                self.assert_recent_tool_error_context(user_text)
+                content = (
+                    '{"type":"python","code":"'
+                    "print('Project summary\\\\n- recovered from invalid path')"
+                    '"}'
+                )
+        elif "Decide whether the task is complete" in user_text:
+            content = "done"
+        else:
+            content = "done"
+
+        return Completion(
+            content=content,
+            model="tool-error-then-good",
+            provider="test",
+            latency_ms=0,
+        )
+
+    def assert_recent_tool_error_context(self, user_text):
+        if "path must be a non-empty string" not in user_text:
+            raise AssertionError("retry prompt did not include the previous tool error")
+
+
 class CapturingClient(LMClient):
     def __init__(self):
         super().__init__(provider="stub")
@@ -90,6 +135,131 @@ class GraphTests(unittest.TestCase):
     def test_parse_python_action_accepts_fenced_json(self):
         code = parse_python_action('```json\n{"type": "python", "code": "print(7)"}\n```')
         self.assertEqual(code, "print(7)")
+
+    def test_final_answer_uses_sandbox_output_not_raw_observation(self):
+        answer = final_answer_from_action(
+            render_observation(
+                {
+                    "status": "ok",
+                    "stdout": "Project summary\n- Uses LangGraph\n",
+                    "stderr": "",
+                    "code": "print('Project summary')",
+                }
+            )
+        )
+
+        self.assertEqual(answer, "Project summary\n- Uses LangGraph")
+        self.assertNotIn('"code"', answer)
+
+    def test_project_overview_dict_output_becomes_human_summary(self):
+        overview = {
+            "files": [
+                "package.json",
+                "tsconfig.json",
+                "vite.config.ts",
+                "src/router.tsx",
+                "src/routes/index.tsx",
+                "src/components/ui/button.tsx",
+                "src/styles.css",
+            ],
+            "documents": [
+                {
+                    "path": "package.json",
+                    "content": (
+                        '{"scripts":{"dev":"vite dev","build":"vite build","lint":"eslint ."},'
+                        '"dependencies":{"react":"^19.2.0","@tanstack/react-start":"^1.0.0",'
+                        '"@tanstack/react-router":"^1.0.0","@tailwindcss/vite":"^4.0.0",'
+                        '"@radix-ui/react-dialog":"^1.0.0"},'
+                        '"devDependencies":{"typescript":"^5.0.0","vite":"^7.0.0"}}'
+                    ),
+                }
+            ],
+            "git_status": "?? .rlm_harness/\n",
+            "git_log": "abc123 project update\n",
+        }
+
+        answer = normalize_user_output(str(overview), task="summarize this project")
+
+        self.assertIn("Project Summary", answer)
+        self.assertIn("Tech stack: Node.js, TypeScript, React", answer)
+        self.assertIn("TanStack Start", answer)
+        self.assertIn("Useful commands", answer)
+        self.assertIn("npm run dev", answer)
+        self.assertNotIn("{'files':", answer)
+
+    def test_final_answer_does_not_expose_empty_sandbox_observation(self):
+        answer = final_answer_from_action(
+            render_observation(
+                {
+                    "status": "ok",
+                    "stdout": "",
+                    "stderr": "",
+                    "code": "def summarize_project(path):\n    return 'summary'",
+                }
+            )
+        )
+
+        self.assertIn("did not produce a user-facing response", answer)
+        self.assertNotIn("summarize_project", answer)
+        self.assertNotIn('"code"', answer)
+
+    def test_reflect_sandbox_error_uses_stderr_not_raw_observation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            traces = TraceStore(Path(temp_dir) / "traces.db")
+            run_id = traces.start_run("list files", temp_dir)
+            state = HarnessState(
+                task="list files",
+                workspace=temp_dir,
+                thread_id=run_id,
+                run_id=run_id,
+                history=[
+                    {
+                        "node": "observe",
+                        "content": render_observation(
+                            {
+                                "status": "sandbox_error",
+                                "stdout": "",
+                                "stderr": "docker socket unavailable",
+                                "code": "print('hello')",
+                            }
+                        ),
+                    }
+                ],
+            )
+
+            final_state = Nodes(LMClient(provider="stub"), traces).reflect(state)
+
+        self.assertEqual(final_state.status, "error")
+        self.assertEqual(final_state.final_answer, "docker socket unavailable")
+        self.assertNotIn('"code"', final_state.final_answer)
+
+    def test_reflect_tool_error_is_retryable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            traces = TraceStore(Path(temp_dir) / "traces.db")
+            run_id = traces.start_run("summarize this project", temp_dir)
+            state = HarnessState(
+                task="summarize this project",
+                workspace=temp_dir,
+                thread_id=run_id,
+                run_id=run_id,
+                history=[
+                    {
+                        "node": "observe",
+                        "content": render_observation(
+                            {
+                                "status": "tool_error",
+                                "stdout": "",
+                                "stderr": "ToolError: path must be a non-empty string",
+                                "code": "print(read_file(None))",
+                            }
+                        ),
+                    }
+                ],
+            )
+
+            final_state = Nodes(LMClient(provider="stub"), traces).reflect(state)
+
+        self.assertEqual(final_state.status, "continue")
 
     def test_stub_graph_reaches_done(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -197,6 +367,66 @@ class GraphTests(unittest.TestCase):
         self.assertIn("sqlite vec", final_state.scratch["memory_context"])
         self.assertIn("Memory context", client.plan_prompt)
         self.assertIn("memory_hydrated", report)
+
+    def test_reflect_continues_informational_task_when_action_prints_nothing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            traces = TraceStore(Path(temp_dir) / "traces.db")
+            run_id = traces.start_run("summarize this project", temp_dir)
+            state = HarnessState(
+                task="summarize this project",
+                workspace=temp_dir,
+                thread_id=run_id,
+                run_id=run_id,
+                history=[
+                    {
+                        "node": "observe",
+                        "content": render_observation(
+                            {
+                                "status": "ok",
+                                "stdout": "",
+                                "stderr": "",
+                                "code": "def summarize_project(path): return 'summary'",
+                            }
+                        ),
+                    }
+                ],
+            )
+
+            final_state = Nodes(LMClient(provider="stub"), traces).reflect(state)
+
+        self.assertEqual(final_state.status, "continue")
+
+    @unittest.skipUnless(docker_available(), "Docker daemon is not available")
+    def test_graph_recovers_from_tool_error_on_next_action(self):
+        DockerREPL.build_image(image=IMAGE)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            traces = TraceStore(workspace / "traces.db")
+            run_id = traces.start_run("summarize this project", str(workspace))
+            state = HarnessState(
+                task="summarize this project",
+                workspace=str(workspace),
+                thread_id=run_id,
+                run_id=run_id,
+            )
+            client = ToolErrorThenGoodActionClient()
+            runtime = GraphRuntimeConfig(
+                sandbox_enabled=True,
+                sandbox_config=SandboxConfig(
+                    image=IMAGE,
+                    workspace=workspace,
+                    default_timeout_s=5,
+                ),
+                max_iterations=3,
+            )
+            graph = build_graph(Nodes(client, traces, runtime), backend="simple")
+            final_state = graph.invoke(state)
+            report = traces.render_report(run_id)
+
+        self.assertEqual(final_state.status, "done")
+        self.assertEqual(client.action_calls, 2)
+        self.assertIn("recovered from invalid path", final_state.final_answer)
+        self.assertIn("tool_error", report)
 
     @unittest.skipIf(importlib.util.find_spec("langgraph") is None, "langgraph is not installed")
     def test_langgraph_backend_runs_explicit_memory_nodes(self):

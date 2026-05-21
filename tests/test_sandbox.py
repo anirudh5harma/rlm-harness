@@ -119,6 +119,7 @@ class DockerREPLTests(unittest.TestCase):
                 result = repl.execute(
                     "print(','.join(tool_names()))\n"
                     "write_file('src/example.py', 'def add(a, b):\\n    return a + b\\n')\n"
+                    "print(list_files('src'))\n"
                     "print(read_file('src/example.py'))\n"
                     "print(search_code('def add', 'src'), end='')\n"
                     "shell = run_shell('python -c \"print(6 * 7)\"')\n"
@@ -129,10 +130,45 @@ class DockerREPLTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertIn("read_file", result.stdout)
+        self.assertIn("project_overview", result.stdout)
         self.assertIn("write_file", result.stdout)
         self.assertIn("def add(a, b):", result.stdout)
         self.assertIn("42", result.stdout)
         self.assertIn("src/example.py", result.stdout)
+
+    def test_project_overview_handles_missing_readme(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "pyproject.toml").write_text(
+                "[project]\nname = 'sample-project'\n",
+                encoding="utf-8",
+            )
+            (workspace / "app.py").write_text("print('hello')\n", encoding="utf-8")
+            with self.sandbox(workspace) as repl:
+                result = repl.execute(
+                    "overview = project_overview()\n"
+                    "print('README.md' in overview['files'])\n"
+                    "print([doc['path'] for doc in overview['documents']])"
+                )
+
+        self.assertTrue(result.ok)
+        self.assertIn("False", result.stdout)
+        self.assertIn("pyproject.toml", result.stdout)
+
+    def test_read_first_existing_supports_readme_variants(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "readme.md").write_text("lowercase readme", encoding="utf-8")
+            with self.sandbox(workspace) as repl:
+                result = repl.execute(
+                    "doc = read_first_existing(['README.md', 'readme.md'])\n"
+                    "print(doc['path'])\n"
+                    "print(doc['content'])"
+                )
+
+        self.assertTrue(result.ok)
+        self.assertIn("README", result.stdout)
+        self.assertIn("lowercase readme", result.stdout)
 
     def test_coding_tools_reject_file_path_escape(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -140,7 +176,19 @@ class DockerREPLTests(unittest.TestCase):
                 result = repl.execute("print(read_file('../outside.txt'))")
 
         self.assertFalse(result.ok)
+        self.assertEqual(result.status, "tool_error")
         self.assertIn("path escapes workspace", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_coding_tools_report_invalid_path_without_traceback(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.sandbox(temp_dir) as repl:
+                result = repl.execute("print(read_file(None))")
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, "tool_error")
+        self.assertIn("path must be a non-empty string", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_container_cleanup_on_exit(self):
         with tempfile.TemporaryDirectory() as temp_dir:

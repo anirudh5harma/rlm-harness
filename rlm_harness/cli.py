@@ -72,6 +72,7 @@ def build_runtime(
             max_tokens=args.subcall_max_tokens,
         ),
         max_action_retries=args.max_action_retries,
+        max_iterations=args.max_iterations,
         memory=memory,
         memory_paging=MemoryPagingConfig(
             max_history_tokens=args.max_history_tokens,
@@ -162,21 +163,41 @@ def emit_run_output(
     error: Optional[str] = None,
 ) -> None:
     if args.json_output:
-        payload = traces.run_summary(run_id)
+        payload = run_output_payload(args, traces, run_id, final_state)
         if error:
             payload["error"] = error
-        print(json.dumps(payload, sort_keys=True))
+        print(json.dumps(payload, indent=2, sort_keys=True))
         return
     if error:
-        print(f"Run failed: {error}", file=sys.stderr)
-        if not args.quiet:
-            print(traces.render_report(run_id))
+        print(f"Error: {error}", file=sys.stderr)
         return
     if final_state and final_state.final_answer:
         print(final_state.final_answer)
-    if not args.quiet:
-        print()
-        print(traces.render_report(run_id))
+
+
+def run_output_payload(
+    args: argparse.Namespace,
+    traces: TraceStore,
+    run_id: str,
+    final_state: Optional[HarnessState],
+) -> dict:
+    summary = traces.run_summary(run_id)
+    response = (
+        final_state.final_answer
+        if final_state is not None and final_state.final_answer is not None
+        else summary.get("final_answer")
+    )
+    return {
+        "status": summary["status"],
+        "response": response,
+        "final_answer": response,
+        "run_id": summary["run_id"],
+        "thread_id": summary["thread_id"],
+        "task": summary["task"],
+        "workspace": summary["workspace"],
+        "event_count": summary["event_count"],
+        "trace_db": args.trace_db,
+    }
 
 
 def checkpoint_path(args: argparse.Namespace) -> Optional[Path]:
@@ -567,7 +588,7 @@ def parser() -> argparse.ArgumentParser:
             help=argparse.SUPPRESS,
         )
         command.add_argument("--json", dest="json_output", action="store_true", help="Emit JSON.")
-        command.add_argument("--quiet", action="store_true", help="Suppress trace report output.")
+        command.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
         command.add_argument("--stream", action="store_true", help="Print LangGraph update events.")
         if include_thread_id:
             command.add_argument(
@@ -664,6 +685,12 @@ def parser() -> argparse.ArgumentParser:
             "--max-action-retries",
             type=int,
             default=1,
+            help=argparse.SUPPRESS,
+        )
+        command.add_argument(
+            "--max-iterations",
+            type=int,
+            default=3,
             help=argparse.SUPPRESS,
         )
         add_model_args(command, public=True)
