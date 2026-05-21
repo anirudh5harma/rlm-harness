@@ -29,6 +29,14 @@ from rlm_harness.graph.nodes import GraphRuntimeConfig, Nodes
 from rlm_harness.memory import Memory, MemoryError, MemoryPagingConfig
 from rlm_harness.model_client import LMClient, LMClientError
 from rlm_harness.model_server import MLXServer, MLXServerConfig, MLXServerError
+from rlm_harness.providers import (
+    PROVIDERS,
+    fetch_provider_models,
+    normalize_provider,
+    provider_names,
+    provider_preset,
+    static_models,
+)
 from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, SandboxError
 from rlm_harness.tracing import TraceStore
 from rlm_harness.types import HarnessState, Msg
@@ -47,11 +55,12 @@ DEFAULT_PROG = "harness"
 
 
 def build_client(args: argparse.Namespace) -> LMClient:
+    provider = normalize_provider(args.provider)
     return LMClient(
-        provider=args.provider,
+        provider=provider,
         model=args.model,
         base_url=args.base_url,
-        api_key=args.api_key or default_api_key(),
+        api_key=args.api_key or default_api_key(provider),
         timeout_s=args.timeout,
     )
 
@@ -315,11 +324,12 @@ def module_status(module: str) -> str:
 
 
 def current_config_payload() -> dict[str, str]:
+    provider = default_provider()
     return {
-        "provider": default_provider(),
+        "provider": provider,
         "model": default_model(),
         "base_url": default_base_url(),
-        "api_key": masked_secret(default_api_key()),
+        "api_key": masked_secret(default_api_key(provider)),
         "config_path": str(CONFIG_PATH),
     }
 
@@ -333,6 +343,30 @@ def print_current_config() -> None:
     print(f"config\t{config['config_path']}")
 
 
+def prompt_numbered_choice(options: list[str], prompt: str) -> Optional[str]:
+    if not sys.stdin.isatty():
+        return None
+    try:
+        raw = input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    if not raw:
+        return None
+    if raw.isdigit():
+        index = int(raw) - 1
+        if 0 <= index < len(options):
+            return options[index]
+    return raw
+
+
+def print_provider_options() -> None:
+    print("Available providers:")
+    for index, name in enumerate(provider_names(), start=1):
+        preset = PROVIDERS[name]
+        print(f"  {index}. {name}\t{preset.label}\t{preset.description}")
+
+
 def cmd_config(args: argparse.Namespace) -> int:
     if args.json_output:
         print(json.dumps(current_config_payload(), sort_keys=True))
@@ -342,39 +376,85 @@ def cmd_config(args: argparse.Namespace) -> int:
 
 
 def cmd_model(args: argparse.Namespace) -> int:
-    if not args.model:
-        print(default_model())
+    provider = normalize_provider(args.provider or default_provider())
+    base_url = args.base_url or default_base_url()
+    if args.model:
+        save_user_config({"model": args.model})
+        print(f"model set to {args.model}")
         return 0
-    save_user_config({"model": args.model})
-    print(f"model set to {args.model}")
+
+    models = (
+        static_models(provider)
+        if args.offline
+        else fetch_provider_models(provider, base_url, default_api_key(provider))
+    )
+    if args.json_output:
+        print(json.dumps({"provider": provider, "models": models}, sort_keys=True))
+        return 0
+
+    print(f"Available models for {provider}:")
+    for index, model_name in enumerate(models, start=1):
+        current = " *" if model_name == default_model() else ""
+        print(f"  {index}. {model_name}{current}")
+    selected = prompt_numbered_choice(
+        models,
+        "Select model number/name, or press Enter to keep current: ",
+    )
+    if selected:
+        save_user_config({"model": selected})
+        print(f"model set to {selected}")
     return 0
 
 
 def cmd_provider(args: argparse.Namespace) -> int:
-    if not args.provider:
-        print(f"provider\t{default_provider()}")
-        print(f"base_url\t{default_base_url()}")
-        print(f"api_key\t{masked_secret(default_api_key())}")
-        return 0
+    provider_arg = " ".join(args.provider) if isinstance(args.provider, list) else args.provider
+    if not provider_arg:
+        print_provider_options()
+        selected = prompt_numbered_choice(
+            provider_names(),
+            "Select provider number/name, or press Enter to keep current: ",
+        )
+        if not selected:
+            print(f"current provider\t{default_provider()}")
+            print(f"base_url\t{default_base_url()}")
+            print(f"api_key\t{masked_secret(default_api_key())}")
+            return 0
+        provider_arg = selected
 
-    updates = {"provider": args.provider}
-    if args.base_url:
-        updates["base_url"] = args.base_url
+    provider = normalize_provider(provider_arg)
+    if provider not in PROVIDERS:
+        print(f"Unknown provider: {provider_arg}", file=sys.stderr)
+        print_provider_options()
+        return 1
+
+    preset = provider_preset(provider)
+    updates = {
+        "provider": provider,
+        "base_url": args.base_url or preset.base_url,
+    }
+    if provider == "stub":
+        updates["model"] = "stub"
+    elif args.set_default_model:
+        updates["model"] = static_models(provider)[0]
+
     if args.api_key:
         updates["api_key"] = args.api_key
-    elif args.provider == "openai-compatible" and args.prompt_key and sys.stdin.isatty():
-        entered = getpass.getpass("API key: ").strip()
+    elif provider != "stub" and args.prompt_key and sys.stdin.isatty():
+        entered = getpass.getpass(f"{preset.label} API key: ").strip()
         if entered:
             updates["api_key"] = entered
 
     save_user_config(updates)
-    print(f"provider set to {args.provider}")
-    if updates.get("base_url"):
-        print(f"base_url set to {updates['base_url']}")
+    print(f"provider set to {provider}")
+    print(f"base_url set to {updates['base_url']}")
+    if updates.get("model"):
+        print(f"model set to {updates['model']}")
     if updates.get("api_key"):
         print("api_key saved")
-    elif args.provider == "openai-compatible" and not default_api_key():
-        print("api_key not set; run: harness /provider openai-compatible --api-key <key>")
+    elif provider != "stub" and not default_api_key(provider):
+        env_hint = preset.api_key_env[0] if preset.api_key_env else "HARNESS_API_KEY"
+        print(f"api_key not set; run: harness /provider {provider} --api-key <key>")
+        print(f"or export {env_hint}=<key>")
     return 0
 
 
@@ -627,8 +707,7 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument(
             "--provider",
             default=default_provider(),
-            choices=["stub", "openai-compatible"],
-            help="Model provider (stub or openai-compatible)." if public else argparse.SUPPRESS,
+            help="Model provider." if public else argparse.SUPPRESS,
         )
         command.add_argument(
             "--model",
@@ -803,16 +882,19 @@ def parser() -> argparse.ArgumentParser:
     doctor.add_argument("--json", dest="json_output", action="store_true")
     doctor.set_defaults(func=cmd_doctor)
 
-    model = subparsers.add_parser("model", help="Show or set the default model.")
+    model = subparsers.add_parser("model", help="List or set the default model.")
     model.add_argument("model", nargs="?", help="Model name, e.g. openai/gpt-4o-mini.")
+    model.add_argument("--provider", default=None)
+    model.add_argument("--base-url", default=None, help=argparse.SUPPRESS)
+    model.add_argument("--json", dest="json_output", action="store_true")
+    model.add_argument("--offline", action="store_true", help="Use bundled model suggestions only.")
     model.set_defaults(func=cmd_model)
 
-    provider = subparsers.add_parser("provider", help="Show or set provider/API key.")
+    provider = subparsers.add_parser("provider", help="Choose provider and save API key.")
     provider.add_argument(
         "provider",
-        nargs="?",
-        choices=["stub", "openai-compatible"],
-        help="Provider to use.",
+        nargs="*",
+        help="Provider to use. Omit to choose from a list.",
     )
     provider.add_argument(
         "--api-key",
@@ -822,7 +904,14 @@ def parser() -> argparse.ArgumentParser:
     provider.add_argument(
         "--base-url",
         default=None,
-        help="OpenAI-compatible base URL, e.g. https://openrouter.ai/api/v1.",
+        help="Override the provider base URL.",
+    )
+    provider.add_argument(
+        "--keep-model",
+        dest="set_default_model",
+        action="store_false",
+        default=True,
+        help="Keep the current model when switching providers.",
     )
     provider.add_argument(
         "--no-prompt",
@@ -945,7 +1034,7 @@ def parser() -> argparse.ArgumentParser:
 def interactive_loop() -> int:
     print("Harness interactive mode. Type a coding task and press Enter. Type /help or /quit.")
     print(f"Using provider={default_provider()} model={default_model()}")
-    print("Configure with /model <name> and /provider openai-compatible --api-key <key>.")
+    print("Configure with /provider to choose a provider, then /model to select a model.")
     while True:
         try:
             task = input("harness> ").strip()
@@ -959,7 +1048,7 @@ def interactive_loop() -> int:
         if task in {"/h", "/help", "help"}:
             print("Tasks: type any natural-language coding task.")
             print(
-                "Slash commands: /model [name], /provider [provider] [--api-key key], "
+                "Slash commands: /provider [name] [--api-key key], /model [name], "
                 "/config, /doctor, /quit"
             )
             continue

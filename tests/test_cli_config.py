@@ -29,11 +29,11 @@ class CLIConfigTests(unittest.TestCase):
         self.assertEqual(cli.normalize_argv(["--help"]), ["--help"])
         self.assertEqual(cli.normalize_argv(["/model", "custom/coder"]), ["model", "custom/coder"])
 
-    def test_harness_env_vars_drive_openai_compatible_defaults(self):
+    def test_harness_env_vars_drive_provider_defaults(self):
         with patch.dict(
             os.environ,
             {
-                "HARNESS_PROVIDER": "openai-compatible",
+                "HARNESS_PROVIDER": "openrouter",
                 "HARNESS_MODEL": "custom/coder",
                 "HARNESS_BASE_URL": "https://example.test/v1",
                 "HARNESS_API_KEY": "secret-key",
@@ -43,7 +43,7 @@ class CLIConfigTests(unittest.TestCase):
             parsed = cli.parser().parse_args(["run", "ship it"])
             client = cli.build_client(parsed)
 
-        self.assertEqual(parsed.provider, "openai-compatible")
+        self.assertEqual(parsed.provider, "openrouter")
         self.assertEqual(parsed.model, "custom/coder")
         self.assertEqual(parsed.base_url, "https://example.test/v1")
         self.assertEqual(client.api_key, "secret-key")
@@ -63,7 +63,7 @@ class CLIConfigTests(unittest.TestCase):
 
     def test_build_client_uses_api_key_argument_before_environment(self):
         args = Namespace(
-            provider="openai-compatible",
+            provider="openrouter",
             model="custom/coder",
             base_url="https://example.test/v1",
             api_key="explicit-key",
@@ -86,13 +86,13 @@ class CLIConfigTests(unittest.TestCase):
             ):
                 config.save_user_config(
                     {
-                        "provider": "openai-compatible",
+                        "provider": "openrouter",
                         "model": "saved/coder",
                         "base_url": "https://saved.example/v1",
                         "api_key": "saved-key",
                     }
                 )
-                self.assertEqual(config.default_provider(), "openai-compatible")
+                self.assertEqual(config.default_provider(), "openrouter")
                 self.assertEqual(config.default_model(), "saved/coder")
                 self.assertEqual(config.default_base_url(), "https://saved.example/v1")
                 self.assertEqual(config.default_api_key(), "saved-key")
@@ -110,7 +110,8 @@ class CLIConfigTests(unittest.TestCase):
                     cli.main(
                         [
                             "/provider",
-                            "openai-compatible",
+                            "openrouter",
+                            "--keep-model",
                             "--base-url",
                             "https://example.test/v1",
                             "--api-key",
@@ -122,9 +123,47 @@ class CLIConfigTests(unittest.TestCase):
                 data = config.load_user_config(config_path)
 
         self.assertEqual(data["model"], "saved/coder")
-        self.assertEqual(data["provider"], "openai-compatible")
+        self.assertEqual(data["provider"], "openrouter")
         self.assertEqual(data["base_url"], "https://example.test/v1")
         self.assertEqual(data["api_key"], "secret-key")
+
+    def test_provider_without_name_lists_popular_options(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(cli.main(["/provider", "--no-prompt"]), 0)
+        text = stdout.getvalue()
+        self.assertIn("openrouter", text)
+        self.assertIn("opencode-go", text)
+        self.assertNotIn("openai-compatible", text)
+
+    def test_model_without_name_lists_provider_models(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(cli.main(["/model", "--provider", "openrouter", "--offline"]), 0)
+        text = stdout.getvalue()
+        self.assertIn("Available models for openrouter", text)
+        self.assertIn("openai/gpt-4o-mini", text)
+
+    def test_openai_compatible_alias_normalizes_to_openrouter(self):
+        with patch.dict(os.environ, {"HARNESS_PROVIDER": "openai-compatible"}, clear=True):
+            self.assertEqual(config.default_provider(), "openrouter")
+
+    def test_provider_accepts_opencode_go_as_two_words(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            with patch.object(config, "CONFIG_PATH", config_path), patch.object(
+                cli, "CONFIG_PATH", config_path
+            ), patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(
+                    cli.main(["/provider", "opencode", "go", "--api-key", "secret-key"]),
+                    0,
+                )
+                data = config.load_user_config(config_path)
+
+        self.assertEqual(data["provider"], "opencode-go")
+        self.assertEqual(data["model"], "opencode/sonic")
 
 
 if __name__ == "__main__":

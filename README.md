@@ -4,7 +4,7 @@ Local recursive coding-agent harness with a direct global CLI.
 
 ## Install with curl
 
-Requirements: Python 3.10+, git, Docker, and an OpenAI-compatible API key for real model runs.
+Requirements: Python 3.10+, git, Docker, and a provider API key for real model runs.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/anirudh5harma/rlm-harness/main/scripts/install.sh | sh
@@ -20,22 +20,36 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ## Configure
 
-Select the model:
+Choose your provider. Running this with no provider lists popular options and prompts you to choose:
+
+```bash
+harness /provider
+```
+
+Or set one directly:
+
+```bash
+harness /provider openrouter --api-key "<your-api-key>"
+```
+
+Then list/select models for that provider:
+
+```bash
+harness /model
+```
+
+Or set a model directly:
 
 ```bash
 harness /model openai/gpt-4o-mini
 ```
 
-Connect your provider and API key:
+Popular providers include `openrouter`, `openai`, `groq`, `together`, `fireworks`, `deepinfra`, `opencode-go`, `custom`, and `stub`.
+
+Optional custom base URL:
 
 ```bash
-harness /provider openai-compatible --api-key "<your-api-key>"
-```
-
-Optional custom OpenAI-compatible base URL:
-
-```bash
-harness /provider openai-compatible --base-url "https://openrouter.ai/api/v1" --api-key "<your-api-key>"
+harness /provider custom --base-url "http://127.0.0.1:8080/v1" --api-key "<your-api-key>"
 ```
 
 Check configuration:
@@ -52,8 +66,8 @@ Start interactive mode in any directory:
 
 ```bash
 harness
-# harness> /model openai/gpt-4o-mini
-# harness> /provider openai-compatible --api-key <key>
+# harness> /provider
+# harness> /model
 # harness> fix the failing tests
 # harness> /quit
 ```
@@ -73,8 +87,8 @@ harness "List files in workspace" --provider stub --json
 Useful commands:
 
 ```bash
+harness /provider [provider] [--api-key key] [--base-url url]
 harness /model [model-name]
-harness /provider [stub|openai-compatible] [--api-key key] [--base-url url]
 harness /config
 harness doctor
 harness trace list

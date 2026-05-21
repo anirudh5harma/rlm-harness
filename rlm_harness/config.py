@@ -5,8 +5,9 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
-DEFAULT_MODEL = "Qwen/Qwen2.5-Coder-7B-Instruct"
-DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+from rlm_harness.providers import normalize_provider, provider_base_url, provider_env_names
+
+DEFAULT_MODEL = "openai/gpt-4o-mini"
 DEFAULT_PROVIDER = "stub"
 CONFIG_DIR = Path(os.environ.get("HARNESS_CONFIG_DIR", Path.home() / ".harness"))
 CONFIG_PATH = Path(os.environ.get("HARNESS_CONFIG", CONFIG_DIR / "config.json"))
@@ -48,7 +49,7 @@ def save_user_config(updates: dict[str, Any], path: Path | None = None) -> dict[
 
 def default_provider() -> str:
     configured = load_user_config().get("provider")
-    return (
+    value = (
         env_first(
             "HARNESS_PROVIDER",
             "RLM_HARNESS_PROVIDER",
@@ -56,6 +57,7 @@ def default_provider() -> str:
         )
         or DEFAULT_PROVIDER
     )
+    return normalize_provider(value)
 
 
 def default_model() -> str:
@@ -67,20 +69,24 @@ def default_model() -> str:
 
 
 def default_base_url() -> str:
+    provider = default_provider()
     configured = load_user_config().get("base_url")
+    provider_default = provider_base_url(provider)
     return env_first(
         "HARNESS_BASE_URL",
         "RLM_HARNESS_BASE_URL",
         "OPENAI_BASE_URL",
-        default=configured or DEFAULT_BASE_URL,
-    ) or DEFAULT_BASE_URL
+        default=configured or provider_default,
+    ) or provider_default
 
 
-def default_api_key() -> Optional[str]:
+def default_api_key(provider: Optional[str] = None) -> Optional[str]:
     configured = load_user_config().get("api_key")
+    active_provider = normalize_provider(provider or default_provider())
     return env_first(
         "HARNESS_API_KEY",
         "RLM_HARNESS_API_KEY",
+        *provider_env_names(active_provider),
         "OPENROUTER_API_KEY",
         "OPENAI_API_KEY",
         default=configured,

@@ -35,9 +35,6 @@ class LMClient:
         if self.provider == "stub":
             return self._stub_complete(messages_list, started)
 
-        if self.provider != "openai-compatible":
-            raise LMClientError(f"unknown provider: {self.provider}")
-
         return self._openai_compatible_complete(
             messages_list,
             max_tokens=max_tokens,
