@@ -24,6 +24,9 @@ from rlm_harness.config import (
     masked_secret,
     save_user_config,
 )
+from rlm_harness.evals.long_horizon import LongHorizonAdapter
+from rlm_harness.evals.runner import EvalRunner, EvalSuite
+from rlm_harness.evals.swebench import SWEBenchAdapter
 from rlm_harness.graph.build import build_graph
 from rlm_harness.graph.nodes import GraphRuntimeConfig, Nodes
 from rlm_harness.memory import Memory, MemoryError, MemoryPagingConfig
@@ -41,7 +44,7 @@ from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, San
 from rlm_harness.tracing import TraceStore
 from rlm_harness.types import HarnessState, Msg
 
-PUBLIC_COMMANDS = {"run", "resume", "trace", "doctor", "model", "provider", "config"}
+PUBLIC_COMMANDS = {"run", "resume", "trace", "doctor", "model", "provider", "config", "eval"}
 INTERNAL_COMMANDS = {
     "langgraph-plan",
     "benchmark-model",
@@ -87,6 +90,7 @@ def build_runtime(
         ),
         max_action_retries=args.max_action_retries,
         max_iterations=args.max_iterations,
+        act_engine=args.act_engine,
         memory=memory,
         memory_paging=MemoryPagingConfig(
             max_history_tokens=args.max_history_tokens,
@@ -252,9 +256,7 @@ def cmd_trace_list(args: argparse.Namespace) -> int:
         print(json.dumps(runs, sort_keys=True))
         return 0
     for run in runs:
-        print(
-            "{run_id}\t{thread_id}\t{status}\t{started_at}\t{task}".format(**run)
-        )
+        print("{run_id}\t{thread_id}\t{status}\t{started_at}\t{task}".format(**run))
     return 0
 
 
@@ -306,6 +308,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         checks["docker_daemon"] = (
             completed.stdout.strip() if completed.returncode == 0 else "unavailable"
         )
+        image_check = subprocess.run(
+            ["docker", "image", "inspect", "rlm-harness-sandbox:latest"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        checks["sandbox_image"] = "ok" if image_check.returncode == 0 else "missing"
     if args.json_output:
         print(json.dumps(checks, sort_keys=True))
     else:
@@ -373,6 +382,48 @@ def cmd_config(args: argparse.Namespace) -> int:
     else:
         print_current_config()
     return 0
+
+
+def cmd_eval(args: argparse.Namespace) -> int:
+    work_root = Path(args.work_root).resolve()
+    if args.eval_suite == "long-horizon":
+        suite = LongHorizonAdapter().load_suite(Path(args.path), work_root)
+    elif args.eval_suite == "swe-bench":
+        records = []
+        with Path(args.path).open(encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    records.append(json.loads(line))
+        adapter = SWEBenchAdapter()
+        suite = EvalSuite(
+            name="swe-bench",
+            cases=[adapter.case_from_record(record, work_root) for record in records[: args.limit]],
+        )
+    else:
+        raise ValueError(f"unknown eval suite: {args.eval_suite}")
+
+    harness_command = [sys.executable, "-m", "rlm_harness.cli", "run"]
+    if args.no_sandbox:
+        harness_command.append("--no-sandbox")
+    harness_command.extend(["--provider", args.provider, "--model", args.model])
+    if args.base_url:
+        harness_command.extend(["--base-url", args.base_url])
+    if args.api_key:
+        harness_command.extend(["--api-key", args.api_key])
+    runner = EvalRunner(harness_command=harness_command, timeout_s=args.eval_timeout)
+    report = runner.run(suite)
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(report.to_json(), encoding="utf-8")
+    if args.json_output:
+        print(report.to_json())
+    else:
+        print(f"suite\t{report.suite}")
+        print(f"run_id\t{report.run_id}")
+        print(f"pass_rate\t{report.pass_rate:.3f}")
+        for result in report.results:
+            print(f"{result.case_id}\t{result.status}\t{result.score:.1f}\t{result.latency_ms}ms")
+    return 0 if all(result.passed for result in report.results) else 1
 
 
 def cmd_model(args: argparse.Namespace) -> int:
@@ -689,8 +740,7 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
         prog=DEFAULT_PROG,
         description=(
-            "Local recursive coding-agent harness. "
-            f'Run a task with: {DEFAULT_PROG} "fix tests"'
+            f'Local recursive coding-agent harness. Run a task with: {DEFAULT_PROG} "fix tests"'
         ),
     )
     subparsers = root.add_subparsers(
@@ -845,6 +895,12 @@ def parser() -> argparse.ArgumentParser:
             default=3,
             help=argparse.SUPPRESS,
         )
+        command.add_argument(
+            "--act-engine",
+            choices=["rlm", "json"],
+            default="rlm",
+            help=argparse.SUPPRESS,
+        )
         add_model_args(command, public=True)
 
     run = subparsers.add_parser("run", help="Run a task.")
@@ -925,6 +981,20 @@ def parser() -> argparse.ArgumentParser:
     config_cmd = subparsers.add_parser("config", help="Show saved harness configuration.")
     config_cmd.add_argument("--json", dest="json_output", action="store_true")
     config_cmd.set_defaults(func=cmd_config)
+
+    eval_cmd = subparsers.add_parser("eval", help="Run harness evaluation suites.")
+    eval_cmd.add_argument("eval_suite", choices=["swe-bench", "long-horizon"])
+    eval_cmd.add_argument(
+        "path", help="Path to a SWE-bench JSONL manifest or long-horizon YAML/JSON suite."
+    )
+    eval_cmd.add_argument("--work-root", default=".harness-evals/work")
+    eval_cmd.add_argument("--output", default=None)
+    eval_cmd.add_argument("--limit", type=int, default=999999)
+    eval_cmd.add_argument("--eval-timeout", type=int, default=900)
+    eval_cmd.add_argument("--json", dest="json_output", action="store_true")
+    eval_cmd.add_argument("--no-sandbox", action="store_true", help=argparse.SUPPRESS)
+    add_model_args(eval_cmd, public=True)
+    eval_cmd.set_defaults(func=cmd_eval)
 
     langgraph_plan = subparsers.add_parser(
         "langgraph-plan",

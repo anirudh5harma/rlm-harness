@@ -50,7 +50,9 @@ class LMClient:
                 break
 
         lower = user_text.lower()
-        if "return a concise numbered plan" in lower:
+        if "the context is available in the repl" in lower:
+            content = self._stub_rlm_response(user_text)
+        elif "return a concise numbered plan" in lower:
             content = "1. Inspect the task.\n2. Produce a concise response.\n3. Record the result."
         elif lower.lstrip().startswith("summarize older harness history."):
             content = self._stub_summary(user_text)
@@ -67,6 +69,44 @@ class LMClient:
             provider=self.provider,
             latency_ms=int((time.perf_counter() - started) * 1000),
         )
+
+    def _stub_rlm_response(self, user_text: str) -> str:
+        lower = user_text.lower()
+        if "list files" in lower or "list the files" in lower:
+            code = (
+                "overview = project_overview()\n"
+                "print('\\n'.join(overview['files']))\n"
+                "answer['content'] = '\\n'.join(overview['files'])\n"
+                "answer['ready'] = True"
+            )
+        elif "fix failing test" in lower or "fix the failing test" in lower:
+            code = (
+                "content = read_file('mathlib.py')\n"
+                "if 'return a - b' in content:\n"
+                "    write_file('mathlib.py', content.replace('return a - b', 'return a + b'))\n"
+                "result = run_shell('python -m unittest', timeout=30)\n"
+                "output = result['stdout'] + result['stderr']\n"
+                "print(output, end='')\n"
+                "if result['returncode'] != 0:\n"
+                "    raise RuntimeError('tests failed')\n"
+                "answer['content'] = output\n"
+                "answer['ready'] = True"
+            )
+        elif "summarize" in lower or "summary" in lower or "explain" in lower:
+            code = (
+                "overview = project_overview()\n"
+                "answer['content'] = str(overview)\n"
+                "answer['ready'] = True\n"
+                "print(answer['content'])"
+            )
+        else:
+            escaped = user_text.replace("\\", "\\\\").replace("'", "\\'")
+            code = (
+                f"answer['content'] = 'Stub RLM completed task: {escaped[:160]}'; "
+                "answer['ready'] = True; "
+                "print(answer['content'])"
+            )
+        return f"```repl\n{code}\n```"
 
     def _stub_action(self, user_text: str) -> str:
         lower = user_text.lower()

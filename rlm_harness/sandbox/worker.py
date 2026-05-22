@@ -47,6 +47,9 @@ def execute_cell(code: str, timeout_s: float, namespace: dict) -> dict:
     try:
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             exec(code, namespace)
+            answer = namespace.get("answer")
+            if isinstance(answer, dict) and answer.get("ready"):
+                print("__RLM_FINAL_ANSWER__" + json.dumps(str(answer.get("content", ""))))
     except CellTimeout:
         status = "timeout"
         timed_out = True
@@ -71,9 +74,20 @@ def execute_cell(code: str, timeout_s: float, namespace: dict) -> dict:
 
 
 def main() -> int:
+    bridge = RLMBridge()
     namespace = {
         "__name__": "__sandbox__",
-        "rlm": RLMBridge(),
+        "rlm": bridge,
+        "llm_query": bridge.llm_query,
+        "llm_query_batched": lambda prompts, context=None, model=None, max_tokens=None: [
+            bridge.llm_query(prompt, context=context, model=model, max_tokens=max_tokens)
+            for prompt in prompts
+        ],
+        "rlm_query": bridge.completion,
+        "rlm_query_batched": lambda prompts, context=None, model=None, max_tokens=None: [
+            bridge.completion(prompt, context=context, model=model, max_tokens=max_tokens)
+            for prompt in prompts
+        ],
         "read_file": read_file,
         "read_first_existing": read_first_existing,
         "list_files": list_files,

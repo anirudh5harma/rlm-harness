@@ -10,6 +10,7 @@ VENV_DIR="$APP_DIR/venv"
 SRC_DIR="$APP_DIR/src"
 PYTHON_BIN="${PYTHON:-}"
 NO_PATH_UPDATE="${HARNESS_NO_PATH_UPDATE:-0}"
+SKIP_SANDBOX_BUILD="${HARNESS_SKIP_SANDBOX_BUILD:-0}"
 
 say() { printf '%s\n' "$*"; }
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -112,6 +113,13 @@ exec "$VENV_DIR/bin/harness" "\$@"
 EOF
 chmod +x "$BIN_DIR/harness"
 ensure_path_hint
+
+if [ "$SKIP_SANDBOX_BUILD" != "1" ] && command -v docker >/dev/null 2>&1; then
+  if docker info >/dev/null 2>&1; then
+    say "Building sandbox image..."
+    "$BIN_DIR/harness" sandbox build || say "Sandbox image build failed; run 'harness sandbox build' later."
+  fi
+fi
 
 say ""
 say "Harness installed."

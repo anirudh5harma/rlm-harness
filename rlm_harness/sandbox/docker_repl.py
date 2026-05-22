@@ -6,7 +6,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from rlm_harness.model_client import LMClient, LMClientError
 from rlm_harness.sandbox.types import ExecutionResult
@@ -52,10 +52,12 @@ class DockerREPL:
         config: Optional[SandboxConfig] = None,
         completion_client: Optional[LMClient] = None,
         subcall_config: Optional[RLMSubcallConfig] = None,
+        recursive_completion: Optional[Callable[[str, str, int, Optional[int]], str]] = None,
     ):
         self.config = config or SandboxConfig()
         self.completion_client = completion_client
         self.subcall_config = subcall_config or RLMSubcallConfig()
+        self.recursive_completion = recursive_completion
         self.container_name = f"rlm-harness-sandbox-{uuid.uuid4().hex[:12]}"
         self._process: Optional[subprocess.Popen[str]] = None
         self._subcalls = 0
@@ -227,6 +229,9 @@ class DockerREPL:
             if message_type == "rlm_completion_request":
                 self._service_rlm_completion(payload)
                 continue
+            if message_type == "llm_completion_request":
+                self._service_llm_completion(payload)
+                continue
             if payload.get("id") == request_id and message_type == "execute_result":
                 return line
         raise SandboxError("timed out waiting for sandbox response")
@@ -250,7 +255,24 @@ class DockerREPL:
         self._process.stdin.write(json.dumps(response, sort_keys=True) + "\n")
         self._process.stdin.flush()
 
-    def _complete_for_sandbox(self, request: dict) -> str:
+    def _service_llm_completion(self, request: dict) -> None:
+        if not self._process or not self._process.stdin:
+            raise SandboxError("sandbox process has no stdin")
+        request_id = str(request.get("id", ""))
+        response = {
+            "type": "llm_completion_response",
+            "id": request_id,
+            "content": "",
+            "error": None,
+        }
+        try:
+            response["content"] = self._complete_for_sandbox(request, recursive=False)
+        except Exception as exc:
+            response["error"] = str(exc)
+        self._process.stdin.write(json.dumps(response, sort_keys=True) + "\n")
+        self._process.stdin.flush()
+
+    def _complete_for_sandbox(self, request: dict, recursive: bool = True) -> str:
         if self.completion_client is None:
             raise SandboxError("rlm.completion is not enabled for this sandbox")
 
@@ -281,6 +303,12 @@ class DockerREPL:
         projected_tokens = self._tokens_used + estimated_prompt_tokens + max_tokens
         if projected_tokens > self.subcall_config.token_budget:
             raise SandboxError("rlm.completion token budget exceeded")
+
+        if recursive and self.recursive_completion is not None:
+            content = self.recursive_completion(query, context, depth_hint, max_tokens)
+            self._subcalls += 1
+            self._tokens_used += estimated_prompt_tokens + max_tokens
+            return content
 
         messages = [
             Msg(

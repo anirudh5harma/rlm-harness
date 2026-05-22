@@ -9,6 +9,7 @@ from typing import Optional
 from rlm_harness.memory import Memory
 from rlm_harness.memory.paging import MemoryPager, MemoryPagingConfig
 from rlm_harness.model_client import LMClient
+from rlm_harness.rlm import RLMRuntime
 from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, SandboxError
 from rlm_harness.sandbox.tools import TOOL_SCHEMAS
 from rlm_harness.tracing import TraceStore
@@ -26,6 +27,7 @@ class GraphRuntimeConfig:
     subcall_config: Optional[RLMSubcallConfig] = None
     max_action_retries: int = 1
     max_iterations: int = 3
+    act_engine: str = "json"
     memory: Optional[Memory] = None
     memory_paging: MemoryPagingConfig = MemoryPagingConfig()
 
@@ -184,6 +186,8 @@ class Nodes:
 
     def act(self, state: HarnessState) -> HarnessState:
         if self.runtime.sandbox_enabled:
+            if self.runtime.act_engine == "rlm":
+                return self._run_rlm_action(state)
             return self._select_sandbox_action(state)
 
         messages = [
@@ -210,6 +214,53 @@ class Nodes:
                 "provider": completion.provider,
                 "latency_ms": completion.latency_ms,
                 "content": completion.content,
+            },
+            node="act",
+        )
+        return state
+
+    def _run_rlm_action(self, state: HarnessState) -> HarnessState:
+        sandbox_config = self.runtime.sandbox_config or SandboxConfig(
+            workspace=Path(state.workspace)
+        )
+        runtime = RLMRuntime(
+            self.client,
+            workspace=Path(state.workspace),
+            max_iterations=self.runtime.max_iterations,
+            max_depth=(self.runtime.subcall_config.max_depth if self.runtime.subcall_config else 3),
+            sandbox_enabled=True,
+            sandbox_config=sandbox_config,
+            subcall_config=self.runtime.subcall_config,
+        )
+        context = {
+            "task": state.task,
+            "plan": state.plan,
+            "recent_history": state.history[-4:],
+            "memory_context": state.scratch.get("memory_context", ""),
+            "workspace": state.workspace,
+        }
+        result = runtime.completion(state.task, context=context)
+        observation = {
+            "status": "ok" if result.status == "done" else result.status,
+            "stdout": result.final_answer,
+            "stderr": "\n".join(obs.stderr for obs in result.observations if obs.stderr),
+            "timed_out": any(obs.timed_out for obs in result.observations),
+            "elapsed_ms": sum(obs.elapsed_ms for obs in result.observations),
+            "subcalls": result.subcalls,
+            "tokens_used": result.tokens_used,
+            "iterations": result.iterations,
+            "engine": "rlm",
+        }
+        rendered = render_observation(observation)
+        state.scratch["last_action"] = rendered
+        state.history.append({"node": "act", "content": rendered})
+        self.traces.event(
+            state.run_id,
+            "rlm_runtime",
+            {
+                **observation,
+                "responses": result.responses,
+                "observations": [obs.__dict__ for obs in result.observations],
             },
             node="act",
         )
