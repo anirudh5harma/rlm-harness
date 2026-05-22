@@ -9,6 +9,7 @@ from typing import Optional
 from rlm_harness.memory import Memory
 from rlm_harness.memory.paging import MemoryPager, MemoryPagingConfig
 from rlm_harness.model_client import LMClient
+from rlm_harness.observability import maybe_traceable
 from rlm_harness.rlm import RLMRuntime
 from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, SandboxError
 from rlm_harness.sandbox.tools import TOOL_SCHEMAS
@@ -154,6 +155,7 @@ class Nodes:
             else None
         )
 
+    @maybe_traceable("Harness.plan", run_type="chain")
     def plan(self, state: HarnessState) -> HarnessState:
         memory_context = self._memory_context(state)
         messages = [
@@ -184,6 +186,7 @@ class Nodes:
         )
         return state
 
+    @maybe_traceable("Harness.act", run_type="chain")
     def act(self, state: HarnessState) -> HarnessState:
         if self.runtime.sandbox_enabled:
             if self.runtime.act_engine == "rlm":
@@ -312,6 +315,7 @@ class Nodes:
             state.history.append({"node": "act", "content": rendered})
         return state
 
+    @maybe_traceable("Harness.execute_action", run_type="tool")
     def execute_action(self, state: HarnessState) -> HarnessState:
         code = state.scratch.pop("pending_action_code", None)
         if not code:
@@ -408,6 +412,7 @@ class Nodes:
             ),
         ]
 
+    @maybe_traceable("Harness.observe", run_type="chain")
     def observe(self, state: HarnessState) -> HarnessState:
         observation = state.scratch.get("last_action", "")
         state.history.append({"node": "observe", "content": observation})
@@ -419,6 +424,7 @@ class Nodes:
         )
         return state
 
+    @maybe_traceable("Harness.reflect", run_type="chain")
     def reflect(self, state: HarnessState) -> HarnessState:
         attempt = int(state.scratch.get("graph_iterations", 0)) + 1
         state.scratch["graph_iterations"] = attempt
@@ -546,6 +552,7 @@ class Nodes:
             lines.append(f"{node}: {content}")
         return "\n\nRecent graph history:\n" + "\n\n".join(lines)
 
+    @maybe_traceable("Harness.done", run_type="chain")
     def done(self, state: HarnessState) -> HarnessState:
         state.status = "done"
         state.final_answer = final_answer_from_action(

@@ -23,6 +23,13 @@ from rlm_harness.types import Completion, HarnessState
 IMAGE = "rlm-harness-sandbox:test"
 
 
+def module_available(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except ModuleNotFoundError:
+        return False
+
+
 def docker_available():
     completed = subprocess.run(
         ["docker", "info", "--format", "{{.ServerVersion}}"],
@@ -428,7 +435,7 @@ class GraphTests(unittest.TestCase):
         self.assertIn("recovered from invalid path", final_state.final_answer)
         self.assertIn("tool_error", report)
 
-    @unittest.skipIf(importlib.util.find_spec("langgraph") is None, "langgraph is not installed")
+    @unittest.skipIf(not module_available("langgraph"), "langgraph is not installed")
     def test_langgraph_backend_runs_explicit_memory_nodes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir)
@@ -469,9 +476,9 @@ class GraphTests(unittest.TestCase):
         self.assertIn("memory_hydrated", report)
         self.assertIn("memory_paged", report)
 
-    @unittest.skipIf(importlib.util.find_spec("langgraph") is None, "langgraph is not installed")
+    @unittest.skipIf(not module_available("langgraph"), "langgraph is not installed")
     @unittest.skipIf(
-        importlib.util.find_spec("langgraph.checkpoint.sqlite") is None,
+        not module_available("langgraph.checkpoint.sqlite"),
         "langgraph SQLite checkpointer is not installed",
     )
     def test_langgraph_backend_writes_sqlite_checkpoints(self):
@@ -515,7 +522,7 @@ class GraphTests(unittest.TestCase):
             )
             nodes = Nodes(LMClient(provider="stub"), traces)
 
-            if importlib.util.find_spec("langgraph") is None:
+            if not module_available("langgraph"):
                 with self.assertRaisesRegex(RuntimeError, "langgraph is not installed"):
                     build_graph(nodes, backend="langgraph")
                 auto_graph = build_graph(nodes, backend="auto")

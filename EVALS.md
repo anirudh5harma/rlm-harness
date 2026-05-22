@@ -1,13 +1,17 @@
-# Harness evals
+# Harness evaluation and observability
 
-Harness includes a lightweight evaluation runner for repo-level coding tasks.
+Harness evals are local-first and deterministic:
 
-## Long-horizon suites
+1. Create a small workspace fixture.
+2. Run `harness` on the case prompt.
+3. Run an objective validation command.
+4. Record pass/fail, score, latency, stdout/stderr, workspace path, metadata, and timestamps.
+5. Optionally upload the completed local report to LangSmith.
 
-Create a YAML or JSON suite with files, a prompt, and a validation command:
+## Write an eval file
 
 ```yaml
-name: long-horizon-smoke
+name: smoke
 cases:
   - id: fix-python-test
     prompt: Fix the failing tests and keep the implementation minimal.
@@ -17,24 +21,30 @@ cases:
       test_mathlib.py: "import unittest\nfrom mathlib import add\nclass T(unittest.TestCase):\n    def test_add(self): self.assertEqual(add(2, 3), 5)\n"
 ```
 
-Run it:
+## Run it
 
 ```bash
-harness eval long-horizon suite.yaml --work-root .harness-evals/work
+harness eval evals.yaml
 ```
 
-## SWE-bench-style manifests
-
-Provide JSONL records with at least:
-
-```json
-{"instance_id":"repo__issue-1","repo":"owner/repo","base_commit":"abc123","problem_statement":"Fix the bug","test_command":"python -m pytest tests/test_bug.py"}
-```
-
-Optional `clone_url` causes the runner to clone and checkout the repo before running Harness.
+Useful flags:
 
 ```bash
-harness eval swe-bench swebench.jsonl --limit 10 --work-root .harness-evals/swe
+harness eval evals.yaml --output results.json
+harness eval evals.yaml --json
+harness eval evals.yaml --work-root .harness-evals/work
 ```
 
-The runner reports pass rate, per-case status, latency, harness output, grader output, and metadata. Use `--json` or `--output results.json` for machine-readable results.
+## Upload to LangSmith
+
+LangSmith is optional and only receives the already-computed local report; it does not replace the local grader.
+
+```bash
+harness eval evals.yaml \
+  --output results.json \
+  --langsmith-upload \
+  --langsmith-dataset rlm-harness-evals \
+  --langsmith-experiment local-run
+```
+
+Without `LANGSMITH_API_KEY`, upload skips cleanly unless `--langsmith-required` is set.

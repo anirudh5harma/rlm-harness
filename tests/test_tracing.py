@@ -12,6 +12,13 @@ from rlm_harness.tracing import TraceStore
 from rlm_harness.types import HarnessState
 
 
+def module_available(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except ModuleNotFoundError:
+        return False
+
+
 class TraceStoreTests(unittest.TestCase):
     def test_records_events(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -203,9 +210,9 @@ class TraceStoreTests(unittest.TestCase):
         self.assertNotIn("--base-url", run_help.getvalue())
         self.assertNotIn("--checkpoint-db", run_help.getvalue())
 
-    @unittest.skipIf(importlib.util.find_spec("langgraph") is None, "langgraph is not installed")
+    @unittest.skipIf(not module_available("langgraph"), "langgraph is not installed")
     @unittest.skipIf(
-        importlib.util.find_spec("langgraph.checkpoint.sqlite") is None,
+        not module_available("langgraph.checkpoint.sqlite"),
         "langgraph SQLite checkpointer is not installed",
     )
     def test_cli_langgraph_stream_and_checkpoint(self):

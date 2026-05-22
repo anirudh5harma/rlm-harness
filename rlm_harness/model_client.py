@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Optional
 
+from rlm_harness.observability import maybe_traceable
 from rlm_harness.types import Completion, Msg
 
 
@@ -23,6 +24,7 @@ class LMClient:
     api_key: Optional[str] = None
     timeout_s: int = 120
 
+    @maybe_traceable("LMClient.complete", run_type="llm")
     def complete(
         self,
         messages: Iterable[Msg],

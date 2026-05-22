@@ -24,9 +24,13 @@ from rlm_harness.config import (
     masked_secret,
     save_user_config,
 )
-from rlm_harness.evals.long_horizon import LongHorizonAdapter
-from rlm_harness.evals.runner import EvalRunner, EvalSuite
-from rlm_harness.evals.swebench import SWEBenchAdapter
+from rlm_harness.evals.langsmith import (
+    LangSmithExperimentUploader,
+    LangSmithUploadConfig,
+    collect_run_metadata,
+)
+from rlm_harness.evals.runner import EvalRunner
+from rlm_harness.evals.suite import EvalSuiteFileLoader
 from rlm_harness.graph.build import build_graph
 from rlm_harness.graph.nodes import GraphRuntimeConfig, Nodes
 from rlm_harness.memory import Memory, MemoryError, MemoryPagingConfig
@@ -384,37 +388,56 @@ def cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def build_eval_harness_command(args: argparse.Namespace) -> list[str]:
+    repo_root = Path(__file__).resolve().parents[1]
+    bootstrap = (
+        "import sys; "
+        f"sys.path.insert(0, {str(repo_root)!r}); "
+        "from rlm_harness.cli import main; "
+        "raise SystemExit(main())"
+    )
+    command = [sys.executable, "-c", bootstrap, "run"]
+    if args.no_sandbox:
+        command.append("--no-sandbox")
+    command.extend(["--provider", args.provider, "--model", args.model])
+    if args.base_url:
+        command.extend(["--base-url", args.base_url])
+    if args.api_key:
+        command.extend(["--api-key", args.api_key])
+    return command
+
+
 def cmd_eval(args: argparse.Namespace) -> int:
     work_root = Path(args.work_root).resolve()
-    if args.eval_suite == "long-horizon":
-        suite = LongHorizonAdapter().load_suite(Path(args.path), work_root)
-    elif args.eval_suite == "swe-bench":
-        records = []
-        with Path(args.path).open(encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    records.append(json.loads(line))
-        adapter = SWEBenchAdapter()
-        suite = EvalSuite(
-            name="swe-bench",
-            cases=[adapter.case_from_record(record, work_root) for record in records[: args.limit]],
-        )
-    else:
-        raise ValueError(f"unknown eval suite: {args.eval_suite}")
+    suite = EvalSuiteFileLoader().load_suite(Path(args.path), work_root)
 
-    harness_command = [sys.executable, "-m", "rlm_harness.cli", "run"]
-    if args.no_sandbox:
-        harness_command.append("--no-sandbox")
-    harness_command.extend(["--provider", args.provider, "--model", args.model])
-    if args.base_url:
-        harness_command.extend(["--base-url", args.base_url])
-    if args.api_key:
-        harness_command.extend(["--api-key", args.api_key])
+    harness_command = build_eval_harness_command(args)
     runner = EvalRunner(harness_command=harness_command, timeout_s=args.eval_timeout)
-    report = runner.run(suite)
+    metadata = collect_run_metadata(args, Path(__file__).resolve().parents[1])
+    report = runner.run(suite, metadata=metadata)
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.output).write_text(report.to_json(), encoding="utf-8")
+    if args.langsmith_upload or args.langsmith_required:
+        config = LangSmithUploadConfig.from_env(
+            dataset_name=args.langsmith_dataset,
+            experiment_name=args.langsmith_experiment,
+        )
+        try:
+            upload_response = LangSmithExperimentUploader(config).upload(
+                report,
+                required=args.langsmith_required,
+            )
+        except RuntimeError as exc:
+            if args.langsmith_required:
+                print(f"LangSmith upload failed: {exc}", file=sys.stderr)
+                return 1
+            print(f"LangSmith upload warning: {exc}", file=sys.stderr)
+        else:
+            if upload_response.get("skipped"):
+                print(f"LangSmith upload skipped: {upload_response['skipped']}", file=sys.stderr)
+            elif not args.json_output:
+                print("langsmith_upload\tok")
     if args.json_output:
         print(report.to_json())
     else:
@@ -983,15 +1006,23 @@ def parser() -> argparse.ArgumentParser:
     config_cmd.set_defaults(func=cmd_config)
 
     eval_cmd = subparsers.add_parser("eval", help="Run harness evaluation suites.")
-    eval_cmd.add_argument("eval_suite", choices=["swe-bench", "long-horizon"])
-    eval_cmd.add_argument(
-        "path", help="Path to a SWE-bench JSONL manifest or long-horizon YAML/JSON suite."
-    )
+    eval_cmd.add_argument("path", help="Path to a local YAML/JSON eval suite.")
     eval_cmd.add_argument("--work-root", default=".harness-evals/work")
     eval_cmd.add_argument("--output", default=None)
-    eval_cmd.add_argument("--limit", type=int, default=999999)
     eval_cmd.add_argument("--eval-timeout", type=int, default=900)
     eval_cmd.add_argument("--json", dest="json_output", action="store_true")
+    eval_cmd.add_argument(
+        "--langsmith-upload",
+        action="store_true",
+        help="Upload the completed local eval report to LangSmith as an external experiment.",
+    )
+    eval_cmd.add_argument(
+        "--langsmith-required",
+        action="store_true",
+        help="Fail the eval command if LangSmith upload is not configured or fails.",
+    )
+    eval_cmd.add_argument("--langsmith-dataset", default="rlm-harness")
+    eval_cmd.add_argument("--langsmith-experiment", default=None)
     eval_cmd.add_argument("--no-sandbox", action="store_true", help=argparse.SUPPRESS)
     add_model_args(eval_cmd, public=True)
     eval_cmd.set_defaults(func=cmd_eval)

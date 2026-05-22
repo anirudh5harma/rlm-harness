@@ -7,6 +7,7 @@ from rlm_harness.evals.runner import (
     GradeResult,
     UnitTestGrader,
 )
+from rlm_harness.evals.suite import EvalSuiteFileLoader
 
 __all__ = [
     "EvalCase",
@@ -14,6 +15,7 @@ __all__ = [
     "EvalResult",
     "EvalRunner",
     "EvalSuite",
+    "EvalSuiteFileLoader",
     "GradeResult",
     "UnitTestGrader",
 ]

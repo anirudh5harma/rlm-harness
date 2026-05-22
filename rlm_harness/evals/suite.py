@@ -6,8 +6,8 @@ from pathlib import Path
 from rlm_harness.evals.runner import EvalCase, EvalSuite, UnitTestGrader
 
 
-class LongHorizonAdapter:
-    """Loads small long-horizon coding suites from JSON or simple YAML."""
+class EvalSuiteFileLoader:
+    """Load local deterministic Harness eval suites from JSON or simple YAML."""
 
     def load_suite(self, path: Path, work_root: Path) -> EvalSuite:
         text = path.read_text(encoding="utf-8")
@@ -15,15 +15,16 @@ class LongHorizonAdapter:
         cases = []
         for raw in data.get("cases", []):
             case_id = str(raw["id"])
+            prompt = str(raw["prompt"])
             cases.append(
                 EvalCase(
                     id=case_id,
-                    prompt=str(raw["prompt"]),
+                    prompt=prompt,
                     workspace=work_root / case_id,
                     files={str(k): str(v) for k, v in raw.get("files", {}).items()},
                     setup_commands=[str(cmd) for cmd in raw.get("setup_commands", [])],
                     grader=UnitTestGrader(str(raw.get("test_command", "python -m unittest"))),
-                    metadata={"benchmark": "long-horizon"},
+                    metadata={"eval_type": "suite", "prompt": prompt},
                 )
             )
         return EvalSuite(name=str(data.get("name", path.stem)), cases=cases)

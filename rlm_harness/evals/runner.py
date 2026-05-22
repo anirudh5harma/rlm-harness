@@ -6,6 +6,7 @@ import subprocess
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Protocol
 
@@ -71,6 +72,8 @@ class EvalResult:
     harness_stderr: str
     workspace: str
     metadata: dict = field(default_factory=dict)
+    started_at: str = ""
+    finished_at: str = ""
 
 
 @dataclass
@@ -78,6 +81,9 @@ class EvalReport:
     run_id: str
     suite: str
     results: list[EvalResult]
+    started_at: str = ""
+    finished_at: str = ""
+    metadata: dict = field(default_factory=dict)
 
     @property
     def pass_rate(self) -> float:
@@ -91,6 +97,9 @@ class EvalReport:
                 "run_id": self.run_id,
                 "suite": self.suite,
                 "pass_rate": self.pass_rate,
+                "started_at": self.started_at,
+                "finished_at": self.finished_at,
+                "metadata": self.metadata,
                 "results": [result.__dict__ for result in self.results],
             },
             indent=2,
@@ -109,13 +118,23 @@ class EvalRunner:
         self.timeout_s = timeout_s
         self.clean_workspaces = clean_workspaces
 
-    def run(self, suite: EvalSuite) -> EvalReport:
+    def run(self, suite: EvalSuite, metadata: Optional[dict] = None) -> EvalReport:
         run_id = str(uuid.uuid4())
+        started_at = utc_now_iso()
         results = [self.run_case(case) for case in suite.cases]
-        return EvalReport(run_id=run_id, suite=suite.name, results=results)
+        finished_at = utc_now_iso()
+        return EvalReport(
+            run_id=run_id,
+            suite=suite.name,
+            results=results,
+            started_at=started_at,
+            finished_at=finished_at,
+            metadata=metadata or {},
+        )
 
     def run_case(self, case: EvalCase) -> EvalResult:
         workspace = Path(case.workspace)
+        started_at = utc_now_iso()
         started = time.perf_counter()
         harness_stdout = ""
         harness_stderr = ""
@@ -140,6 +159,7 @@ class EvalRunner:
             grade = GradeResult(False, 0.0, (exc.stdout or "") + (exc.stderr or ""))
         finally:
             latency_ms = int((time.perf_counter() - started) * 1000)
+            finished_at = utc_now_iso()
             if self.clean_workspaces and workspace.exists():
                 shutil.rmtree(workspace)
         return EvalResult(
@@ -153,6 +173,8 @@ class EvalRunner:
             harness_stderr=harness_stderr,
             workspace=str(workspace),
             metadata=case.metadata,
+            started_at=started_at,
+            finished_at=finished_at,
         )
 
     def prepare_workspace(self, case: EvalCase) -> None:
@@ -175,3 +197,7 @@ class EvalRunner:
                 raise RuntimeError(
                     f"setup failed for {case.id}: {command}\n{completed.stdout}{completed.stderr}"
                 )
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

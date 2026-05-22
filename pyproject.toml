@@ -15,6 +15,7 @@ memory = [
   "sentence-transformers>=3",
 ]
 mlx = ["mlx-lm"]
+observability = ["langsmith>=0.2"]
 dev = [
   "pytest>=8",
   "ruff>=0.6",
