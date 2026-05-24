@@ -117,7 +117,9 @@ ensure_path_hint
 if [ "$SKIP_SANDBOX_BUILD" != "1" ] && command -v docker >/dev/null 2>&1; then
   if docker info >/dev/null 2>&1; then
     say "Building sandbox image..."
-    "$BIN_DIR/harness" sandbox build || say "Sandbox image build failed; run 'harness sandbox build' later."
+    "$BIN_DIR/harness" sandbox build \
+      --dockerfile "$SRC_DIR/docker/sandbox.Dockerfile" \
+      --context "$SRC_DIR" || say "Sandbox image build failed; run 'harness sandbox build' later."
   fi
 fi
 

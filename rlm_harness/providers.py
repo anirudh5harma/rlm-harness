@@ -6,6 +6,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Optional
 
+USER_AGENT = "rlm-harness/0.1 (+https://github.com/anirudh5harma/rlm-harness)"
+
 
 @dataclass(frozen=True)
 class ProviderPreset:
@@ -186,7 +188,10 @@ def fetch_provider_models(
         return static_models(provider)
     preset = provider_preset(provider)
     url = preset.models_url or base_url.rstrip("/") + "/models"
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
+    }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(url, headers=headers, method="GET")

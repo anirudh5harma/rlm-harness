@@ -11,6 +11,8 @@ from typing import Optional
 from rlm_harness.observability import maybe_traceable
 from rlm_harness.types import Completion, Msg
 
+USER_AGENT = "rlm-harness/0.1 (+https://github.com/anirudh5harma/rlm-harness)"
+
 
 class LMClientError(RuntimeError):
     pass
@@ -160,7 +162,10 @@ class LMClient:
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        }
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
@@ -174,6 +179,12 @@ class LMClient:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
                 raw = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = _read_http_error_detail(exc)
+            message = f"model request failed: HTTP {exc.code} {exc.reason}"
+            if detail:
+                message = f"{message}: {detail}"
+            raise LMClientError(message) from exc
         except urllib.error.URLError as exc:
             raise LMClientError(f"model request failed: {exc}") from exc
         except json.JSONDecodeError as exc:
@@ -196,3 +207,32 @@ class LMClient:
             completion_tokens=usage.get("completion_tokens"),
             raw=raw,
         )
+
+
+def _read_http_error_detail(exc: urllib.error.HTTPError, limit: int = 500) -> str:
+    try:
+        body = exc.read(limit + 1).decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+    if len(body) > limit:
+        body = body[:limit].rstrip() + "..."
+    if not body:
+        return ""
+    try:
+        decoded = json.loads(body)
+    except json.JSONDecodeError:
+        return " ".join(body.split())
+    if isinstance(decoded, dict):
+        error = decoded.get("error")
+        if isinstance(error, dict):
+            for key in ("message", "detail", "error"):
+                value = error.get(key)
+                if value:
+                    return str(value)
+        elif error:
+            return str(error)
+        for key in ("message", "detail"):
+            value = decoded.get(key)
+            if value:
+                return str(value)
+    return " ".join(body.split())

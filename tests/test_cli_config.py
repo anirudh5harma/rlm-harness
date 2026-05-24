@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import subprocess
 import unittest
 from argparse import Namespace
 from pathlib import Path
@@ -26,6 +27,8 @@ class CLIConfigTests(unittest.TestCase):
     def test_default_task_alias_still_normalizes_to_run(self):
         self.assertEqual(cli.normalize_argv(["fix tests"]), ["run", "fix tests"])
         self.assertEqual(cli.normalize_argv(["run", "fix tests"]), ["run", "fix tests"])
+        self.assertEqual(cli.normalize_argv(["update"]), ["update"])
+        self.assertEqual(cli.normalize_argv(["/update"]), ["update"])
         self.assertEqual(cli.normalize_argv(["--help"]), ["--help"])
         self.assertEqual(cli.normalize_argv(["/model", "custom/coder"]), ["model", "custom/coder"])
 
@@ -196,6 +199,41 @@ class CLIConfigTests(unittest.TestCase):
 
         self.assertEqual(data["provider"], "opencode-go")
         self.assertEqual(data["model"], "glm-5.1")
+
+    def test_update_rebuilds_sandbox_from_managed_source_checkout(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            app_dir = Path(tmpdir) / "harness"
+            src_dir = app_dir / "src"
+            venv_bin = app_dir / "venv/bin"
+            (src_dir / ".git").mkdir(parents=True)
+            venv_bin.mkdir(parents=True)
+            (venv_bin / "pip").write_text("", encoding="utf-8")
+            calls = []
+
+            def fake_run(command, **kwargs):
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0, stdout="refs/heads/main\n", stderr="")
+
+            args = Namespace(in_place=False, no_sandbox_rebuild=False)
+            with patch.dict(os.environ, {"HARNESS_APP_DIR": str(app_dir)}, clear=True), patch(
+                "shutil.which", return_value="/usr/local/bin/docker"
+            ), patch("subprocess.run", side_effect=fake_run):
+                self.assertEqual(cli.cmd_update(args), 0)
+
+        self.assertIn(
+            [
+                str(venv_bin / "harness"),
+                "sandbox",
+                "build",
+                "--dockerfile",
+                str(src_dir / "docker/sandbox.Dockerfile"),
+                "--context",
+                str(src_dir),
+            ],
+            calls,
+        )
 
 
 if __name__ == "__main__":

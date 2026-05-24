@@ -475,7 +475,15 @@ def cmd_update(args: argparse.Namespace) -> int:
     if not args.no_sandbox_rebuild and shutil.which("docker"):
         print("Rebuilding sandbox image...")
         subprocess.run(
-            [str(venv_dir / "bin" / "harness"), "sandbox", "build"],
+            [
+                str(venv_dir / "bin" / "harness"),
+                "sandbox",
+                "build",
+                "--dockerfile",
+                str(src_dir / "docker/sandbox.Dockerfile"),
+                "--context",
+                str(src_dir),
+            ],
             check=False,
         )
     return 0
@@ -744,11 +752,15 @@ def cmd_benchmark_model(args: argparse.Namespace) -> int:
 
 def cmd_check_model(args: argparse.Namespace) -> int:
     client = build_client(args)
-    completion = client.complete(
-        [Msg(role="user", content=args.prompt)],
-        max_tokens=args.max_tokens,
-        temperature=0,
-    )
+    try:
+        completion = client.complete(
+            [Msg(role="user", content=args.prompt)],
+            max_tokens=args.max_tokens,
+            temperature=0,
+        )
+    except LMClientError as exc:
+        print(f"Model check failed: {exc}", file=sys.stderr)
+        return 1
     print(completion.content.strip())
     print(
         f"model={completion.model} provider={completion.provider} "

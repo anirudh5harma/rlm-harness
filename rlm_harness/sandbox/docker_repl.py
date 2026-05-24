@@ -79,7 +79,12 @@ class DockerREPL:
             str(dockerfile),
             str(context),
         ]
-        completed = subprocess.run(command, text=True, capture_output=True, check=False)
+        try:
+            completed = subprocess.run(command, text=True, capture_output=True, check=False)
+        except FileNotFoundError as exc:
+            raise SandboxError(
+                "docker CLI not found; install Docker or run with --no-sandbox"
+            ) from exc
         if completed.returncode != 0:
             raise SandboxError(
                 f"docker build failed\nSTDOUT:\n{completed.stdout}\nSTDERR:\n{completed.stderr}"
@@ -125,14 +130,19 @@ class DockerREPL:
         if self.config.tmpfs:
             command.insert(-1, "--tmpfs")
             command.insert(-1, self.config.tmpfs)
-        self._process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
+        try:
+            self._process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        except FileNotFoundError as exc:
+            raise SandboxError(
+                "docker CLI not found; install Docker or run with --no-sandbox"
+            ) from exc
         self._ensure_started()
 
     def execute(self, code: str, timeout_s: Optional[float] = None) -> ExecutionResult:

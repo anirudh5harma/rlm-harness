@@ -2,21 +2,47 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from rlm_harness.model_client import LMClient
-from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig
+from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, SandboxError
 
 IMAGE = "rlm-harness-sandbox:test"
 
 
 def docker_available():
-    completed = subprocess.run(
-        ["docker", "info", "--format", "{{.ServerVersion}}"],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
     return completed.returncode == 0
+
+
+class DockerREPLConfigTests(unittest.TestCase):
+    def test_start_reports_missing_docker_cli_cleanly(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "subprocess.Popen", side_effect=FileNotFoundError("docker")
+        ):
+            repl = DockerREPL(SandboxConfig(workspace=Path(temp_dir)))
+
+            with self.assertRaisesRegex(
+                SandboxError,
+                "docker CLI not found; install Docker or run with --no-sandbox",
+            ):
+                repl.start()
+
+    def test_build_image_reports_missing_docker_cli_cleanly(self):
+        with patch("subprocess.run", side_effect=FileNotFoundError("docker")):
+            with self.assertRaisesRegex(
+                SandboxError,
+                "docker CLI not found; install Docker or run with --no-sandbox",
+            ):
+                DockerREPL.build_image()
 
 
 @unittest.skipUnless(docker_available(), "Docker daemon is not available")

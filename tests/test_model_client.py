@@ -1,8 +1,10 @@
 import json
+import urllib.error
 import unittest
+from io import BytesIO
 from unittest.mock import patch
 
-from rlm_harness.model_client import LMClient
+from rlm_harness.model_client import LMClient, LMClientError
 from rlm_harness.types import Msg
 
 
@@ -57,6 +59,30 @@ class LMClientTests(unittest.TestCase):
         self.assertEqual(payload["max_tokens"], 12)
         self.assertEqual(payload["messages"][0]["content"], "Reply with exactly: hello")
         self.assertEqual(request.headers["Authorization"], "Bearer token")
+        self.assertIn("rlm-harness/0.1", request.headers["User-agent"])
+
+    def test_http_error_includes_provider_detail(self):
+        def fake_urlopen(request, timeout):
+            raise urllib.error.HTTPError(
+                request.full_url,
+                403,
+                "Forbidden",
+                hdrs={},
+                fp=BytesIO(b'{"error":{"message":"model access denied"}}'),
+            )
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            client = LMClient(
+                provider="openai-compatible",
+                model="test-model",
+                base_url="http://127.0.0.1:8080/v1",
+                api_key="token",
+            )
+            with self.assertRaisesRegex(
+                LMClientError,
+                "HTTP 403 Forbidden: model access denied",
+            ):
+                client.complete([Msg(role="user", content="hello")])
 
 
 if __name__ == "__main__":
