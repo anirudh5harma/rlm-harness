@@ -49,11 +49,43 @@ class CLIConfigTests(unittest.TestCase):
         self.assertEqual(client.api_key, "secret-key")
 
     def test_config_accepts_common_api_key_fallbacks(self):
-        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "openrouter-key"}, clear=True):
+        with patch.dict(
+            os.environ,
+            {"HARNESS_PROVIDER": "openrouter", "OPENROUTER_API_KEY": "openrouter-key"},
+            clear=True,
+        ):
             self.assertEqual(config.default_api_key(), "openrouter-key")
 
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "openai-key"}, clear=True):
+        with patch.dict(
+            os.environ,
+            {"HARNESS_PROVIDER": "openai", "OPENAI_API_KEY": "openai-key"},
+            clear=True,
+        ):
             self.assertEqual(config.default_api_key(), "openai-key")
+
+    def test_provider_specific_defaults_do_not_reuse_saved_values(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            with patch.object(config, "CONFIG_PATH", config_path), patch.dict(
+                os.environ,
+                {"HARNESS_PROVIDER": "groq", "OPENAI_API_KEY": "openai-key"},
+                clear=True,
+            ):
+                config.save_user_config(
+                    {
+                        "provider": "openai",
+                        "model": "gpt-5.5",
+                        "base_url": "https://api.openai.com/v1",
+                        "api_key": "saved-openai-key",
+                    }
+                )
+
+                self.assertEqual(config.default_provider(), "groq")
+                self.assertEqual(config.default_model(), "openai/gpt-oss-120b")
+                self.assertEqual(config.default_base_url(), "https://api.groq.com/openai/v1")
+                self.assertIsNone(config.default_api_key())
 
     def test_pyproject_exposes_harness_and_legacy_console_scripts(self):
         pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
@@ -142,11 +174,11 @@ class CLIConfigTests(unittest.TestCase):
             self.assertEqual(cli.main(["/model", "--provider", "openrouter", "--offline"]), 0)
         text = stdout.getvalue()
         self.assertIn("Available models for openrouter", text)
-        self.assertIn("openai/gpt-4o-mini", text)
+        self.assertIn("qwen/qwen3.7-max", text)
 
-    def test_openai_compatible_alias_normalizes_to_openrouter(self):
+    def test_openai_compatible_alias_normalizes_to_custom(self):
         with patch.dict(os.environ, {"HARNESS_PROVIDER": "openai-compatible"}, clear=True):
-            self.assertEqual(config.default_provider(), "openrouter")
+            self.assertEqual(config.default_provider(), "custom")
 
     def test_provider_accepts_opencode_go_as_two_words(self):
         import tempfile
@@ -163,7 +195,7 @@ class CLIConfigTests(unittest.TestCase):
                 data = config.load_user_config(config_path)
 
         self.assertEqual(data["provider"], "opencode-go")
-        self.assertEqual(data["model"], "opencode/sonic")
+        self.assertEqual(data["model"], "glm-5.1")
 
 
 if __name__ == "__main__":

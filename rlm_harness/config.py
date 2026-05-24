@@ -5,9 +5,14 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
-from rlm_harness.providers import normalize_provider, provider_base_url, provider_env_names
+from rlm_harness.providers import (
+    normalize_provider,
+    provider_base_url,
+    provider_env_names,
+    static_models,
+)
 
-DEFAULT_MODEL = "openai/gpt-4o-mini"
+DEFAULT_MODEL = "stub"
 DEFAULT_PROVIDER = "stub"
 CONFIG_DIR = Path(os.environ.get("HARNESS_CONFIG_DIR", Path.home() / ".harness"))
 CONFIG_PATH = Path(os.environ.get("HARNESS_CONFIG", CONFIG_DIR / "config.json"))
@@ -61,16 +66,30 @@ def default_provider() -> str:
 
 
 def default_model() -> str:
-    configured = load_user_config().get("model")
-    return (
-        env_first("HARNESS_MODEL", "RLM_HARNESS_MODEL", default=configured or DEFAULT_MODEL)
-        or DEFAULT_MODEL
-    )
+    configured_env = env_first("HARNESS_MODEL", "RLM_HARNESS_MODEL")
+    if configured_env:
+        return configured_env
+
+    provider = default_provider()
+    config = load_user_config()
+    configured_provider = config.get("provider")
+    configured_model = config.get("model")
+    if configured_model and (
+        not configured_provider or normalize_provider(str(configured_provider)) == provider
+    ):
+        return str(configured_model)
+    return static_models(provider)[0] if static_models(provider) else DEFAULT_MODEL
 
 
 def default_base_url() -> str:
     provider = default_provider()
-    configured = load_user_config().get("base_url")
+    config = load_user_config()
+    configured_provider = config.get("provider")
+    configured = (
+        config.get("base_url")
+        if not configured_provider or normalize_provider(str(configured_provider)) == provider
+        else None
+    )
     provider_default = provider_base_url(provider)
     return env_first(
         "HARNESS_BASE_URL",
@@ -81,14 +100,21 @@ def default_base_url() -> str:
 
 
 def default_api_key(provider: Optional[str] = None) -> Optional[str]:
-    configured = load_user_config().get("api_key")
+    config = load_user_config()
     active_provider = normalize_provider(provider or default_provider())
+    configured_provider = config.get("provider")
+    configured = (
+        config.get("api_key")
+        if (
+            not configured_provider
+            or normalize_provider(str(configured_provider)) == active_provider
+        )
+        else None
+    )
     return env_first(
         "HARNESS_API_KEY",
         "RLM_HARNESS_API_KEY",
         *provider_env_names(active_provider),
-        "OPENROUTER_API_KEY",
-        "OPENAI_API_KEY",
         default=configured,
     )
 

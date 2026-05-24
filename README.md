@@ -42,11 +42,12 @@ harness
 harness                              # interactive mode
 harness "fix the failing tests"       # run one task
 harness /provider openrouter --api-key <key>
-harness /model openai/gpt-4o-mini
+harness /model qwen/qwen3.7-max
 harness /config
 harness doctor
 ```
 
-Supported provider shortcuts include `openrouter`, `openai`, `groq`, `together`, `fireworks`, `deepinfra`, `opencode-go`, `custom`, and `stub`.
+Supported provider shortcuts include `openrouter`, `openai`, `groq`, `together`,
+`fireworks`, `deepinfra`, `opencode-go`, `custom`, and `stub`.
 
 Configuration is saved in `~/.harness/config.json`.
