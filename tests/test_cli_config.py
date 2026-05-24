@@ -51,6 +51,11 @@ class CLIConfigTests(unittest.TestCase):
         self.assertEqual(parsed.base_url, "https://example.test/v1")
         self.assertEqual(client.api_key, "secret-key")
 
+    def test_run_defaults_to_json_action_engine(self):
+        parsed = cli.parser().parse_args(["run", "what is this project"])
+
+        self.assertEqual(parsed.act_engine, "json")
+
     def test_config_accepts_common_api_key_fallbacks(self):
         with patch.dict(
             os.environ,

@@ -1085,7 +1085,7 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument(
             "--act-engine",
             choices=["rlm", "json"],
-            default="rlm",
+            default="json",
             help=argparse.SUPPRESS,
         )
         add_model_args(command, public=True)

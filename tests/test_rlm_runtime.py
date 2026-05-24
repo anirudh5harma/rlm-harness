@@ -3,7 +3,12 @@ import unittest
 from pathlib import Path
 
 from rlm_harness.model_client import LMClient
-from rlm_harness.rlm.runtime import RLMRuntime, find_repl_blocks
+from rlm_harness.rlm.runtime import (
+    RLMRuntime,
+    build_bootstrap_code,
+    find_repl_blocks,
+    stopped_final_answer,
+)
 
 
 class ScriptedRuntimeClient(LMClient):
@@ -72,6 +77,33 @@ class RLMRuntimeTests(unittest.TestCase):
             result = runtime.completion("root", context="ctx")
         self.assertEqual(result.final_answer, "sub answer")
         self.assertEqual(result.subcalls, 1)
+
+    def test_bootstrap_preserves_structured_context_and_ctx_alias(self):
+        namespace = {}
+        exec(build_bootstrap_code({"task": "what is this project", "plan": ["inspect"]}), namespace)
+
+        self.assertIsInstance(namespace["context"], dict)
+        self.assertEqual(namespace["context"]["task"], "what is this project")
+        self.assertIs(namespace["ctx"], namespace["context"])
+
+    def test_stopped_final_answer_does_not_return_raw_repl_blocks(self):
+        answer = stopped_final_answer(
+            [
+                (
+                    "```repl\n"
+                    "print(context.keys())\n"
+                    "```\n"
+                    "```repl\n"
+                    "answer['content'] = 'summary'\n"
+                    "```"
+                )
+            ],
+            [],
+        )
+
+        self.assertNotIn("```repl", answer)
+        self.assertNotIn("print(context.keys())", answer)
+        self.assertIn("stopped before producing a final answer", answer)
 
 
 if __name__ == "__main__":

@@ -35,7 +35,7 @@ class RLMBridge:
     def completion(
         self,
         query: str,
-        context: Any,
+        context: Any = None,
         depth_hint: int = -1,
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,

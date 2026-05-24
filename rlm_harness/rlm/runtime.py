@@ -206,7 +206,7 @@ class RLMRuntime:
                         tokens_used=self.tokens_used,
                     )
         return RLMResult(
-            final_answer=responses[-1].strip() if responses else "",
+            final_answer=stopped_final_answer(responses, observations),
             status="stopped",
             iterations=self.max_iterations,
             observations=observations,
@@ -276,7 +276,7 @@ class RLMRuntime:
                 self.tokens_used,
             )
         return RLMResult(
-            responses[-1].strip() if responses else "",
+            stopped_final_answer(responses, observations),
             "stopped",
             self.max_iterations,
             observations,
@@ -390,7 +390,9 @@ The REPL contains:
 - SHOW_VARS
 
 Inspect context programmatically. Set answer['content'] and answer['ready'] = True
-when done.
+when done. If you have enough information to answer after seeing observations,
+reply with the final user-facing answer in plain text and do not include another
+```repl block.
 """
 
 
@@ -417,15 +419,25 @@ def serialize_context(context: Any) -> str:
 
 
 def build_bootstrap_code(context: Any) -> str:
-    encoded = json.dumps(serialize_context(context))
+    encoded = json.dumps(context if is_json_serializable(context) else serialize_context(context))
     return (
-        "import json\n"
+        "import json, os, subprocess\n"
+        "from pathlib import Path\n"
         f"context = json.loads({json.dumps(encoded)})\n"
+        "ctx = context\n"
         "answer = {'content': '', 'ready': False}\n"
         "def _emit_answer_if_ready():\n"
         "    if isinstance(answer, dict) and answer.get('ready'):\n"
         "        print('__RLM_FINAL_ANSWER__' + json.dumps(str(answer.get('content', ''))))\n"
     )
+
+
+def is_json_serializable(value: Any) -> bool:
+    try:
+        json.dumps(value)
+    except TypeError:
+        return False
+    return True
 
 
 def observation_from_execution(code: str, result: ExecutionResult) -> RLMObservation:
@@ -448,3 +460,35 @@ def extract_answer_ready(stdout: str) -> Optional[str]:
             except json.JSONDecodeError:
                 return line[len(marker) :]
     return None
+
+
+def stopped_final_answer(responses: list[str], observations: list[RLMObservation]) -> str:
+    for response in reversed(responses):
+        text = remove_repl_blocks(response).strip()
+        if text:
+            return text
+
+    for observation in reversed(observations):
+        stdout = strip_answer_markers(observation.stdout).strip()
+        if stdout:
+            return stdout
+        stderr = observation.stderr.strip()
+        if stderr:
+            return (
+                "The RLM runtime stopped before producing a final answer. "
+                f"Last error:\n{stderr}"
+            )
+    return "The RLM runtime stopped before producing a final answer."
+
+
+def remove_repl_blocks(text: str) -> str:
+    return REPL_BLOCK_RE.sub("", text)
+
+
+def strip_answer_markers(stdout: str) -> str:
+    lines = []
+    marker = "__RLM_FINAL_ANSWER__"
+    for line in stdout.splitlines():
+        if not line.startswith(marker):
+            lines.append(line)
+    return "\n".join(lines)
