@@ -23,6 +23,7 @@ from rlm_harness.model_client import LMClient
 from rlm_harness.observability import maybe_traceable
 from rlm_harness.rlm import RLMRuntime
 from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, SandboxError
+from rlm_harness.sandbox import tools as sandbox_tools
 from rlm_harness.sandbox.tools import (
     TOOL_SCHEMAS,
     is_project_overview_payload,
@@ -234,17 +235,17 @@ class Nodes:
             sandbox_config=sandbox_config,
             subcall_config=self.runtime.subcall_config,
         )
-        context = {
-            "task": state.task,
-            "plan": state.plan,
-            "recent_history": state.history[-4:],
-            "memory_context": state.scratch.get("memory_context", ""),
-            "workspace": state.workspace,
-        }
+        context = rlm_action_context(state, sandbox_config.mount_path)
         result = runtime.completion(state.task, context=context)
+        final_answer = fallback_project_answer_if_needed(
+            state.task,
+            result.final_answer,
+            Path(state.workspace),
+            result.status,
+        )
         observation = {
-            "status": "ok" if result.status == "done" else result.status,
-            "stdout": result.final_answer,
+            "status": "ok" if final_answer else result.status,
+            "stdout": final_answer or result.final_answer,
             "stderr": "\n".join(obs.stderr for obs in result.observations if obs.stderr),
             "timed_out": any(obs.timed_out for obs in result.observations),
             "elapsed_ms": sum(obs.elapsed_ms for obs in result.observations),
@@ -447,13 +448,16 @@ class Nodes:
             user_output = observation_user_output(observation_payload)
             if (
                 user_output
-                and looks_like_source_dump(user_output)
-                and not looks_like_project_summary(user_output)
+                and (
+                    looks_like_file_inventory(user_output)
+                    or looks_like_source_dump(user_output)
+                    or not looks_like_project_summary(user_output)
+                )
             ):
                 state.status = self._continue_or_stop(
                     state,
                     last_observation,
-                    "project-summary task printed source code instead of a project summary",
+                    "project-summary task did not produce a project summary",
                     include_last_answer=False,
                 )
                 self.traces.event(
@@ -462,8 +466,7 @@ class Nodes:
                     {
                         "decision": state.status,
                         "content": (
-                            "project-summary task printed source code instead of a "
-                            "project summary"
+                            "project-summary task did not produce a project summary"
                         ),
                     },
                     node="reflect",
@@ -724,3 +727,58 @@ def parse_structured_output(output: str):
 
 def render_tool_list() -> str:
     return ", ".join(str(schema["name"]) for schema in TOOL_SCHEMAS)
+
+
+def rlm_action_context(state: HarnessState, mount_path: str = "/workspace") -> dict:
+    return {
+        "task": state.task,
+        "plan": state.plan,
+        "recent_history": state.history[-4:],
+        "memory_context": state.scratch.get("memory_context", ""),
+        "workspace": mount_path,
+        "workspace_note": (
+            "Code runs inside Docker. Use workspace-relative tool paths or "
+            f"{mount_path}; host paths are not available."
+        ),
+    }
+
+
+def fallback_project_answer_if_needed(
+    task: str,
+    answer: str,
+    workspace: Path,
+    status: str,
+) -> str:
+    if is_project_summary_task(task) and (
+        status != "done" or not looks_like_project_summary_answer(answer)
+    ):
+        return workspace_project_summary(workspace)
+    if is_project_audit_task(task) and (status != "done" or not looks_like_project_audit(answer)):
+        return workspace_project_audit(workspace)
+    return answer
+
+
+def looks_like_project_summary_answer(answer: str) -> bool:
+    return (
+        bool(answer.strip())
+        and looks_like_project_summary(answer)
+        and not looks_like_file_inventory(answer)
+        and not looks_like_source_dump(answer)
+    )
+
+
+def workspace_project_summary(workspace: Path) -> str:
+    return call_workspace_project_tool(workspace, sandbox_tools.project_summary)
+
+
+def workspace_project_audit(workspace: Path) -> str:
+    return call_workspace_project_tool(workspace, sandbox_tools.project_audit)
+
+
+def call_workspace_project_tool(workspace: Path, tool) -> str:
+    old_workspace = sandbox_tools.WORKSPACE
+    sandbox_tools.WORKSPACE = workspace.resolve()
+    try:
+        return str(tool())
+    finally:
+        sandbox_tools.WORKSPACE = old_workspace

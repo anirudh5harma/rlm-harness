@@ -416,6 +416,10 @@ when done. If you have enough information to answer after seeing observations,
 reply with the final user-facing answer in plain text and do not include another
 ```repl block.
 
+In Docker, the workspace is mounted at /workspace. Do not use host absolute paths
+such as /Users/... inside REPL code. Prefer the workspace tools with relative
+paths like read_file('package.json') or search_code('pattern', 'src').
+
 Use the REPL as your workspace, not as a dumping ground. Prefer targeted reads,
 searches, summaries, and recursive calls over printing huge files. When the task
 requires understanding many files or long text, split the material into chunks
@@ -426,7 +430,7 @@ verification when possible, and report changed files plus verification results.
 
 For project identity or overview questions such as "what is this project", call
 project_summary() when it is available and return that summary. Do not answer by
-printing raw source code.
+printing raw source code or a raw file list.
 
 For project review, audit, risk, issue, or gap-analysis questions, use
 project_audit() as a baseline and inspect relevant source/config files before

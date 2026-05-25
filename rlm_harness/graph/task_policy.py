@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import json
 import re
 from pathlib import Path
 
@@ -185,6 +187,18 @@ def looks_like_source_dump(output: str) -> bool:
 
 
 def looks_like_file_inventory(output: str) -> bool:
+    parsed = parse_possible_literal(output)
+    if isinstance(parsed, list) and parsed:
+        path_items = [item for item in parsed if isinstance(item, str)]
+        if len(path_items) == len(parsed):
+            path_like_items = [
+                item
+                for item in path_items
+                if "/" in item or "." in Path(item).name
+            ]
+            if len(path_like_items) >= 3 and len(path_like_items) / len(path_items) >= 0.75:
+                return True
+
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     if len(lines) < 8:
         return False
@@ -231,3 +245,17 @@ def looks_like_project_audit(output: str) -> bool:
         re.search(r"\b[\w./-]+\.(py|ts|tsx|js|jsx|json|toml|md|css|yml|yaml)\b", output)
     )
     return has_audit_language and has_evidence and not looks_like_file_inventory(output)
+
+
+def parse_possible_literal(output: str):
+    stripped = output.strip()
+    if not stripped:
+        return None
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return ast.literal_eval(stripped)
+    except (ValueError, SyntaxError):
+        return None

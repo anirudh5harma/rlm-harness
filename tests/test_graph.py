@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ from rlm_harness.graph.build import build_graph
 from rlm_harness.graph.nodes import (
     GraphRuntimeConfig,
     Nodes,
+    fallback_project_answer_if_needed,
     final_answer_from_action,
     is_code_editing_task,
     is_informational_task,
@@ -21,6 +23,7 @@ from rlm_harness.graph.nodes import (
     parse_numbered_plan,
     parse_python_action,
     render_observation,
+    rlm_action_context,
 )
 from rlm_harness.memory import Memory, MemoryPagingConfig
 from rlm_harness.model_client import LMClient
@@ -369,6 +372,81 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(final_state.status, "continue")
         self.assertFalse(final_state.final_answer)
 
+    def test_project_summary_reflects_json_file_inventory_as_incomplete(self):
+        file_inventory = json.dumps(
+            [
+                ".gitignore",
+                "package.json",
+                "src/routes/index.tsx",
+                "src/router.tsx",
+                "src/styles.css",
+            ],
+            indent=2,
+        )
+        self.assertTrue(looks_like_file_inventory(file_inventory))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            traces = TraceStore(Path(temp_dir) / "traces.db")
+            run_id = traces.start_run("what is this project about", temp_dir)
+            state = HarnessState(
+                task="what is this project about",
+                workspace=temp_dir,
+                thread_id=run_id,
+                run_id=run_id,
+                history=[
+                    {
+                        "node": "observe",
+                        "content": render_observation(
+                            {
+                                "status": "ok",
+                                "stdout": file_inventory,
+                                "stderr": "",
+                                "code": "print(json.dumps(list_files()))",
+                            }
+                        ),
+                    }
+                ],
+            )
+
+            final_state = Nodes(LMClient(provider="stub"), traces).reflect(state)
+
+        self.assertEqual(final_state.status, "continue")
+        self.assertFalse(final_state.final_answer)
+
+    def test_rlm_action_context_uses_container_workspace_not_host_path(self):
+        state = HarnessState(
+            task="explain this project",
+            workspace="/Users/anirudhsharma/Documents/projects/who-am-i",
+            thread_id="thread",
+            run_id="run",
+            plan=["inspect"],
+        )
+
+        context = rlm_action_context(state)
+
+        self.assertEqual(context["workspace"], "/workspace")
+        self.assertNotIn("/Users/anirudhsharma", json.dumps(context))
+        self.assertIn("host paths are not available", context["workspace_note"])
+
+    def test_project_summary_fallback_replaces_file_inventory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "README.md").write_text(
+                "# Who Am I\n\nA personal portfolio app.\n",
+                encoding="utf-8",
+            )
+            bad_answer = json.dumps(["package.json", "src/routes/index.tsx"], indent=2)
+
+            answer = fallback_project_answer_if_needed(
+                "what is this project about",
+                bad_answer,
+                workspace,
+                "done",
+            )
+
+        self.assertIn("Project Summary", answer)
+        self.assertIn("personal portfolio app", answer)
+        self.assertNotEqual(answer, bad_answer)
+
     def test_stopped_project_summary_source_dump_does_not_return_source(self):
         source_dump = "\n".join(
             [
@@ -409,7 +487,7 @@ class GraphTests(unittest.TestCase):
             final_state = Nodes(LMClient(provider="stub"), traces, runtime).reflect(state)
 
         self.assertEqual(final_state.status, "stopped")
-        self.assertIn("printed source code", final_state.final_answer)
+        self.assertIn("did not produce a project summary", final_state.final_answer)
         self.assertNotIn("class Example", final_state.final_answer)
 
     def test_final_answer_does_not_expose_empty_sandbox_observation(self):
