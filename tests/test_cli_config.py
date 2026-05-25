@@ -51,10 +51,10 @@ class CLIConfigTests(unittest.TestCase):
         self.assertEqual(parsed.base_url, "https://example.test/v1")
         self.assertEqual(client.api_key, "secret-key")
 
-    def test_run_defaults_to_json_action_engine(self):
+    def test_run_defaults_to_rlm_action_engine(self):
         parsed = cli.parser().parse_args(["run", "what is this project"])
 
-        self.assertEqual(parsed.act_engine, "json")
+        self.assertEqual(parsed.act_engine, "rlm")
 
     def test_config_accepts_common_api_key_fallbacks(self):
         with patch.dict(
@@ -219,7 +219,12 @@ class CLIConfigTests(unittest.TestCase):
 
             def fake_run(command, **kwargs):
                 calls.append(command)
-                return subprocess.CompletedProcess(command, 0, stdout="refs/heads/main\n", stderr="")
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout="refs/heads/main\n",
+                    stderr="",
+                )
 
             args = Namespace(in_place=False, no_sandbox_rebuild=False)
             with patch.dict(os.environ, {"HARNESS_APP_DIR": str(app_dir)}, clear=True), patch(

@@ -5,9 +5,11 @@ from pathlib import Path
 from rlm_harness.model_client import LMClient
 from rlm_harness.rlm.runtime import (
     RLM_SYSTEM_PROMPT,
+    RLMObservation,
     RLMRuntime,
     build_bootstrap_code,
     find_repl_blocks,
+    format_observation,
     stopped_final_answer,
 )
 
@@ -105,6 +107,19 @@ class RLMRuntimeTests(unittest.TestCase):
         self.assertNotIn("```repl", answer)
         self.assertNotIn("print(context.keys())", answer)
         self.assertIn("stopped before producing a final answer", answer)
+
+    def test_observation_format_truncates_large_streams(self):
+        observation = RLMObservation(
+            code="print('x')",
+            stdout="a" * 30_000,
+            status="ok",
+        )
+
+        rendered = format_observation(observation)
+
+        self.assertLess(len(rendered), 14_000)
+        self.assertIn("truncated", rendered)
+        self.assertIn("narrow the query", rendered)
 
     def test_rlm_prompt_routes_project_overview_to_summary_tool(self):
         self.assertIn("project_summary", RLM_SYSTEM_PROMPT)

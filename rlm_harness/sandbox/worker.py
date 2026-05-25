@@ -12,6 +12,7 @@ from rlm_shim import RLMBridge
 from sandbox_tools import (
     ToolError,
     apply_patch,
+    chunk_file,
     git_diff,
     git_log,
     git_status,
@@ -20,6 +21,7 @@ from sandbox_tools import (
     project_overview,
     project_summary,
     read_file,
+    read_file_slice,
     read_first_existing,
     run_shell,
     search_code,
@@ -91,6 +93,8 @@ def main() -> int:
             for prompt in prompts
         ],
         "read_file": read_file,
+        "read_file_slice": read_file_slice,
+        "chunk_file": chunk_file,
         "read_first_existing": read_first_existing,
         "list_files": list_files,
         "project_overview": project_overview,

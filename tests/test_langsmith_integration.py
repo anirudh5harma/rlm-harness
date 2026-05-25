@@ -10,13 +10,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rlm_harness import cli
-from rlm_harness.evals.runner import EvalReport, EvalResult
 from rlm_harness.evals.langsmith import (
     LangSmithExperimentUploader,
     LangSmithUploadConfig,
     build_external_experiment_payload,
     collect_run_metadata,
 )
+from rlm_harness.evals.runner import EvalReport, EvalResult
 from rlm_harness.observability import maybe_traceable
 
 
@@ -162,7 +162,9 @@ class LangSmithIntegrationTests(unittest.TestCase):
         self.assertEqual(wrapped(2), 3)
 
     def test_cmd_eval_uses_importable_cli_path_for_case_workspaces(self):
-        args = cli.parser().parse_args(["eval", "suite.yaml", "--provider", "stub", "--model", "stub"])
+        args = cli.parser().parse_args(
+            ["eval", "suite.yaml", "--provider", "stub", "--model", "stub"]
+        )
 
         command = cli.build_eval_harness_command(args)
 

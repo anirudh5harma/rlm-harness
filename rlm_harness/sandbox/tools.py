@@ -60,6 +60,62 @@ def read_file(path: str, max_bytes: int = DEFAULT_MAX_READ_BYTES) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def read_file_slice(
+    path: str,
+    start: int = 0,
+    max_bytes: int = 12_000,
+) -> dict[str, Any]:
+    target = workspace_path(path)
+    if start < 0:
+        raise ToolError("start must be non-negative")
+    if max_bytes <= 0:
+        raise ToolError("max_bytes must be positive")
+    if not target.is_file():
+        raise ToolError(f"not a file: {path}")
+
+    data = target.read_bytes()
+    total = len(data)
+    end = min(start + max_bytes, total)
+    content = data[start:end].decode("utf-8", errors="replace") if start < total else ""
+    return {
+        "path": str(target.relative_to(WORKSPACE)),
+        "start": start,
+        "end": end,
+        "total_bytes": total,
+        "truncated": end < total,
+        "content": content,
+    }
+
+
+def chunk_file(
+    path: str,
+    chunk_chars: int = 12_000,
+    max_chunks: int = 40,
+) -> list[dict[str, Any]]:
+    if chunk_chars <= 0:
+        raise ToolError("chunk_chars must be positive")
+    if max_chunks <= 0:
+        raise ToolError("max_chunks must be positive")
+
+    max_bytes = chunk_chars * max_chunks * 4
+    content = read_file(path, max_bytes=max_bytes)
+    chunks = []
+    for index, start in enumerate(range(0, len(content), chunk_chars)):
+        if index >= max_chunks:
+            break
+        end = min(start + chunk_chars, len(content))
+        chunks.append(
+            {
+                "index": index,
+                "start": start,
+                "end": end,
+                "chars": end - start,
+                "content": content[start:end],
+            }
+        )
+    return chunks
+
+
 def read_first_existing(
     paths: list[str],
     max_bytes: int = DEFAULT_MAX_READ_BYTES,
@@ -803,6 +859,8 @@ def search_code(pattern: str, path: str = ".", max_count: int = 100) -> str:
 def tool_names() -> list[str]:
     return [
         "read_file",
+        "read_file_slice",
+        "chunk_file",
         "read_first_existing",
         "list_files",
         "project_overview",
@@ -868,6 +926,24 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "read_file",
         "description": "Read a UTF-8 text file from the mounted workspace.",
         "parameters": {"path": "workspace-relative path", "max_bytes": "optional byte cap"},
+    },
+    {
+        "name": "read_file_slice",
+        "description": "Read a bounded byte slice from a workspace text file.",
+        "parameters": {
+            "path": "workspace-relative path",
+            "start": "optional zero-based byte offset",
+            "max_bytes": "optional byte count",
+        },
+    },
+    {
+        "name": "chunk_file",
+        "description": "Split a workspace text file into bounded character chunks.",
+        "parameters": {
+            "path": "workspace-relative path",
+            "chunk_chars": "optional chunk size",
+            "max_chunks": "optional chunk cap",
+        },
     },
     {
         "name": "read_first_existing",

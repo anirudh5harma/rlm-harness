@@ -60,6 +60,10 @@ class TraceStoreTests(unittest.TestCase):
                         memory_db,
                         "--thread-id",
                         "thread-resume-cli",
+                        "--provider",
+                        "stub",
+                        "--model",
+                        "stub",
                         "--quiet",
                     ]
                 )
@@ -73,6 +77,10 @@ class TraceStoreTests(unittest.TestCase):
                         trace_db,
                         "--memory-db",
                         memory_db,
+                        "--provider",
+                        "stub",
+                        "--model",
+                        "stub",
                         "--quiet",
                     ]
                 )
@@ -96,6 +104,10 @@ class TraceStoreTests(unittest.TestCase):
                         "--no-memory",
                         "--trace-db",
                         trace_db,
+                        "--provider",
+                        "stub",
+                        "--model",
+                        "stub",
                         "--json",
                     ]
                 )
@@ -136,6 +148,10 @@ class TraceStoreTests(unittest.TestCase):
                         "--no-memory",
                         "--trace-db",
                         trace_db,
+                        "--provider",
+                        "stub",
+                        "--model",
+                        "stub",
                     ]
                 )
             output = stdout.getvalue()
@@ -182,6 +198,10 @@ class TraceStoreTests(unittest.TestCase):
                         "--no-memory",
                         "--trace-db",
                         trace_db,
+                        "--provider",
+                        "stub",
+                        "--model",
+                        "stub",
                         "--json",
                     ]
                 )
@@ -231,6 +251,10 @@ class TraceStoreTests(unittest.TestCase):
                         "langgraph",
                         "--trace-db",
                         trace_db,
+                        "--provider",
+                        "stub",
+                        "--model",
+                        "stub",
                         "--checkpoint-db",
                         str(checkpoint_db),
                         "--stream",

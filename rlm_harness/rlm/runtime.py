@@ -10,11 +10,19 @@ from pathlib import Path
 from typing import Any, Optional
 
 from rlm_harness.model_client import LMClient
-from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, SandboxError
+from rlm_harness.sandbox import (
+    DockerREPL,
+    RecursiveCompletionResult,
+    RLMSubcallConfig,
+    SandboxConfig,
+    SandboxError,
+)
 from rlm_harness.sandbox.types import ExecutionResult
 from rlm_harness.types import Msg
 
 REPL_BLOCK_RE = re.compile(r"```repl\s*\n(.*?)\n```", re.DOTALL | re.IGNORECASE)
+MAX_OBSERVATION_CODE_CHARS = 8_000
+MAX_OBSERVATION_STREAM_CHARS = 12_000
 
 
 @dataclass
@@ -25,6 +33,8 @@ class RLMObservation:
     status: str = "ok"
     timed_out: bool = False
     elapsed_ms: int = 0
+    stdout_truncated: bool = False
+    stderr_truncated: bool = False
 
 
 @dataclass
@@ -291,10 +301,19 @@ class RLMRuntime:
         context: str,
         depth_hint: int,
         max_tokens: Optional[int],
-    ) -> str:
-        if depth_hint >= 0 and depth_hint > self.max_depth:
-            return self.llm_query(query, context=context, max_tokens=max_tokens)
-        return self.rlm_query(query, context=context, max_tokens=max_tokens)
+        model: Optional[str] = None,
+    ) -> RecursiveCompletionResult:
+        subcalls_before = self.subcalls
+        tokens_before = self.tokens_used
+        if depth_hint >= 0 and depth_hint >= self.max_depth:
+            content = self.llm_query(query, context=context, model=model, max_tokens=max_tokens)
+        else:
+            content = self.rlm_query(query, context=context, model=model, max_tokens=max_tokens)
+        return RecursiveCompletionResult(
+            content=content,
+            subcalls=max(1, self.subcalls - subcalls_before),
+            tokens_used=max(0, self.tokens_used - tokens_before),
+        )
 
     def llm_query(
         self,
@@ -389,12 +408,21 @@ The REPL contains:
 - rlm_query / rlm_query_batched
 - SHOW_VARS
 - When running in the sandbox, workspace tools such as project_summary, project_audit,
-  project_overview, list_files, read_file, search_code, run_shell, and git_status
+  project_overview, list_files, read_file, read_file_slice, chunk_file, search_code,
+  run_shell, and git_status
 
 Inspect context programmatically. Set answer['content'] and answer['ready'] = True
 when done. If you have enough information to answer after seeing observations,
 reply with the final user-facing answer in plain text and do not include another
 ```repl block.
+
+Use the REPL as your workspace, not as a dumping ground. Prefer targeted reads,
+searches, summaries, and recursive calls over printing huge files. When the task
+requires understanding many files or long text, split the material into chunks
+with read_file_slice/chunk_file and ask llm_query/rlm_query focused sub-questions,
+then synthesize and verify.
+For code-editing tasks, inspect before editing, make minimal changes, run focused
+verification when possible, and report changed files plus verification results.
 
 For project identity or overview questions such as "what is this project", call
 project_summary() when it is available and return that summary. Do not answer by
@@ -412,12 +440,34 @@ def find_repl_blocks(text: str) -> list[str]:
 
 
 def format_observation(observation: RLMObservation) -> str:
-    parts = [f"Code executed:\n```python\n{observation.code}\n```", f"Status: {observation.status}"]
+    code, code_truncated = truncate_text(observation.code, MAX_OBSERVATION_CODE_CHARS)
+    parts = [f"Code executed:\n```python\n{code}\n```", f"Status: {observation.status}"]
+    if code_truncated:
+        parts.append("Code note: truncated before returning to the model.")
     if observation.stdout:
-        parts.append("STDOUT:\n" + observation.stdout)
+        stdout, truncated = truncate_text(observation.stdout, MAX_OBSERVATION_STREAM_CHARS)
+        parts.append("STDOUT:\n" + stdout)
+        if truncated or observation.stdout_truncated:
+            parts.append("STDOUT note: truncated before returning to the model.")
     if observation.stderr:
-        parts.append("STDERR:\n" + observation.stderr)
+        stderr, truncated = truncate_text(observation.stderr, MAX_OBSERVATION_STREAM_CHARS)
+        parts.append("STDERR:\n" + stderr)
+        if truncated or observation.stderr_truncated:
+            parts.append("STDERR note: truncated before returning to the model.")
     return "\n\n".join(parts)
+
+
+def truncate_text(text: str, max_chars: int) -> tuple[str, bool]:
+    if len(text) <= max_chars:
+        return text, False
+    head = max_chars // 2
+    tail = max_chars - head
+    omitted = len(text) - max_chars
+    marker = (
+        f"\n\n... [truncated {omitted} chars; "
+        "narrow the query or inspect a smaller slice] ...\n\n"
+    )
+    return (text[:head] + marker + text[-tail:], True)
 
 
 def serialize_context(context: Any) -> str:

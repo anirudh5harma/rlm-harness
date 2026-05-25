@@ -40,10 +40,17 @@ class RLMSubcallConfig:
     max_depth: int = 3
     max_subcalls: int = 32
     token_budget: int = 200_000
-    max_query_chars: int = 4_000
-    max_context_chars: int = 20_000
-    max_tokens: int = 512
+    max_query_chars: int = 8_000
+    max_context_chars: int = 200_000
+    max_tokens: int = 1024
     temperature: float = 0.1
+
+
+@dataclass(frozen=True)
+class RecursiveCompletionResult:
+    content: str
+    subcalls: int = 1
+    tokens_used: int = 0
 
 
 class DockerREPL:
@@ -52,7 +59,9 @@ class DockerREPL:
         config: Optional[SandboxConfig] = None,
         completion_client: Optional[LMClient] = None,
         subcall_config: Optional[RLMSubcallConfig] = None,
-        recursive_completion: Optional[Callable[[str, str, int, Optional[int]], str]] = None,
+        recursive_completion: Optional[
+            Callable[[str, str, int, Optional[int], Optional[str]], str | RecursiveCompletionResult]
+        ] = None,
     ):
         self.config = config or SandboxConfig()
         self.completion_client = completion_client
@@ -315,11 +324,26 @@ class DockerREPL:
             raise SandboxError("rlm.completion token budget exceeded")
 
         if recursive and self.recursive_completion is not None:
-            content = self.recursive_completion(query, context, depth_hint, max_tokens)
-            self._subcalls += 1
-            self._tokens_used += estimated_prompt_tokens + max_tokens
-            return content
+            model = request.get("model")
+            model_name = str(model) if model else None
+            recursive_result = self.recursive_completion(
+                query,
+                context,
+                depth_hint,
+                max_tokens,
+                model_name,
+            )
+            if isinstance(recursive_result, RecursiveCompletionResult):
+                self._subcalls += max(1, recursive_result.subcalls)
+                # Recursive completions account for their model usage in the host runtime.
+                # Keeping sandbox-side token accounting to direct LLM calls avoids double counts.
+                return recursive_result.content
 
+            self._subcalls += 1
+            return str(recursive_result)
+
+        model = request.get("model")
+        model_name = str(model) if model else None
         messages = [
             Msg(
                 role="system",
@@ -330,6 +354,9 @@ class DockerREPL:
             ),
             Msg(role="user", content=f"Query:\n{query}\n\nContext:\n{context}"),
         ]
+        old_model = self.completion_client.model
+        if model_name:
+            self.completion_client.model = model_name
         try:
             completion = self.completion_client.complete(
                 messages,
@@ -338,6 +365,8 @@ class DockerREPL:
             )
         except LMClientError as exc:
             raise SandboxError(f"rlm.completion model request failed: {exc}") from exc
+        finally:
+            self.completion_client.model = old_model
 
         self._subcalls += 1
         completion_tokens = completion.completion_tokens or estimate_tokens(completion.content)

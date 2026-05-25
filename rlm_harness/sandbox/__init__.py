@@ -2,6 +2,7 @@
 
 from rlm_harness.sandbox.docker_repl import (
     DockerREPL,
+    RecursiveCompletionResult,
     RLMSubcallConfig,
     SandboxConfig,
     SandboxError,
@@ -12,6 +13,7 @@ __all__ = [
     "DockerREPL",
     "ExecutionResult",
     "RLMSubcallConfig",
+    "RecursiveCompletionResult",
     "SandboxConfig",
     "SandboxError",
 ]

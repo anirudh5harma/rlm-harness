@@ -30,7 +30,7 @@ class LangSmithUploadConfig:
         dataset_name: str,
         experiment_name: Optional[str] = None,
         description: str = "RLM Harness evaluation run",
-    ) -> "LangSmithUploadConfig":
+    ) -> LangSmithUploadConfig:
         return cls(
             api_key=os.environ.get("LANGSMITH_API_KEY"),
             endpoint=os.environ.get("LANGSMITH_ENDPOINT", LANGSMITH_DEFAULT_ENDPOINT),
@@ -139,7 +139,12 @@ class LangSmithExperimentUploader:
         return self.transport(url, payload, headers, self.config.timeout_s)
 
 
-def post_json(url: str, body: dict[str, Any], headers: dict[str, str], timeout_s: int) -> dict[str, Any]:
+def post_json(
+    url: str,
+    body: dict[str, Any],
+    headers: dict[str, str],
+    timeout_s: int,
+) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),

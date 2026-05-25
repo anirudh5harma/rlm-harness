@@ -9,9 +9,11 @@ from rlm_harness.graph.nodes import (
     GraphRuntimeConfig,
     Nodes,
     final_answer_from_action,
+    is_code_editing_task,
     is_informational_task,
     is_project_audit_task,
     is_project_summary_task,
+    looks_like_code_edit_result,
     looks_like_file_inventory,
     looks_like_project_audit,
     looks_like_source_dump,
@@ -210,6 +212,11 @@ class GraphTests(unittest.TestCase):
 
         self.assertTrue(is_project_audit_task(task))
         self.assertTrue(is_informational_task(task))
+
+    def test_code_edit_task_requires_change_or_verification_evidence(self):
+        self.assertTrue(is_code_editing_task("fix failing tests in mathlib.py"))
+        self.assertFalse(looks_like_code_edit_result("done"))
+        self.assertTrue(looks_like_code_edit_result("Changed mathlib.py\nVerification: pytest OK"))
 
     def test_action_prompt_routes_project_summary_to_summary_tool(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -614,6 +621,35 @@ class GraphTests(unittest.TestCase):
 
         self.assertEqual(final_state.status, "continue")
 
+    def test_reflect_continues_code_edit_when_output_lacks_evidence(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            traces = TraceStore(Path(temp_dir) / "traces.db")
+            run_id = traces.start_run("fix failing tests in mathlib.py", temp_dir)
+            state = HarnessState(
+                task="fix failing tests in mathlib.py",
+                workspace=temp_dir,
+                thread_id=run_id,
+                run_id=run_id,
+                history=[
+                    {
+                        "node": "observe",
+                        "content": render_observation(
+                            {
+                                "status": "ok",
+                                "stdout": "done",
+                                "stderr": "",
+                                "code": "print('done')",
+                            }
+                        ),
+                    }
+                ],
+            )
+
+            final_state = Nodes(LMClient(provider="stub"), traces).reflect(state)
+
+        self.assertEqual(final_state.status, "continue")
+        self.assertFalse(final_state.final_answer)
+
     @unittest.skipUnless(docker_available(), "Docker daemon is not available")
     def test_graph_recovers_from_tool_error_on_next_action(self):
         DockerREPL.build_image(image=IMAGE)
@@ -636,6 +672,7 @@ class GraphTests(unittest.TestCase):
                     default_timeout_s=5,
                 ),
                 max_iterations=3,
+                act_engine="json",
             )
             graph = build_graph(Nodes(client, traces, runtime), backend="simple")
             final_state = graph.invoke(state)
@@ -774,7 +811,7 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(final_state.status, "done")
         self.assertIn("alpha.txt", final_state.final_answer)
         self.assertIn("beta.txt", final_state.final_answer)
-        self.assertIn("sandbox_execution", report)
+        self.assertIn("rlm_runtime", report)
         self.assertIn("alpha.txt", report)
 
     @unittest.skipUnless(docker_available(), "Docker daemon is not available")
@@ -842,6 +879,7 @@ class GraphTests(unittest.TestCase):
                     default_timeout_s=5,
                 ),
                 max_action_retries=1,
+                act_engine="json",
             )
             graph = build_graph(Nodes(client, traces, runtime), backend="simple")
             final_state = graph.invoke(state)

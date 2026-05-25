@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -28,8 +29,9 @@ class UnitTestGrader:
     timeout_s: int = 300
 
     def grade(self, workspace: Path) -> GradeResult:
+        command = normalize_python_command(self.command)
         completed = subprocess.run(
-            self.command,
+            command,
             cwd=workspace,
             shell=True,
             executable="/bin/sh",
@@ -114,7 +116,7 @@ class EvalRunner:
         timeout_s: int = 900,
         clean_workspaces: bool = False,
     ):
-        self.harness_command = harness_command or ["harness"]
+        self.harness_command = normalize_python_argv(harness_command or ["harness"])
         self.timeout_s = timeout_s
         self.clean_workspaces = clean_workspaces
 
@@ -201,3 +203,16 @@ class EvalRunner:
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def normalize_python_argv(command: list[str]) -> list[str]:
+    if command and command[0] == "python" and shutil.which("python") is None:
+        return [sys.executable, *command[1:]]
+    return command
+
+
+def normalize_python_command(command: str) -> str:
+    if command == "python" or command.startswith("python "):
+        if shutil.which("python") is None:
+            return sys.executable + command[len("python") :]
+    return command

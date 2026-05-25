@@ -1067,7 +1067,7 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument(
             "--subcall-max-tokens",
             type=int,
-            default=512,
+            default=1024,
             help=argparse.SUPPRESS,
         )
         command.add_argument(
@@ -1079,13 +1079,13 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument(
             "--max-iterations",
             type=int,
-            default=3,
+            default=6,
             help=argparse.SUPPRESS,
         )
         command.add_argument(
             "--act-engine",
             choices=["rlm", "json"],
-            default="json",
+            default="rlm",
             help=argparse.SUPPRESS,
         )
         add_model_args(command, public=True)
@@ -1296,7 +1296,7 @@ def parser() -> argparse.ArgumentParser:
     sandbox_run.add_argument("--max-depth", type=int, default=3)
     sandbox_run.add_argument("--max-subcalls", type=int, default=32)
     sandbox_run.add_argument("--token-budget", type=int, default=200000)
-    sandbox_run.add_argument("--max-tokens", type=int, default=512)
+    sandbox_run.add_argument("--max-tokens", type=int, default=1024)
     sandbox_run.add_argument("--model-timeout", dest="timeout", type=int, default=120)
     add_model_args(sandbox_run, include_timeout=False)
     sandbox_run.set_defaults(func=cmd_sandbox_run)

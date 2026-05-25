@@ -6,6 +6,8 @@ from unittest.mock import patch
 
 from rlm_harness.model_client import LMClient
 from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, SandboxError
+from rlm_harness.sandbox import tools as sandbox_tools
+from rlm_harness.types import Completion
 
 IMAGE = "rlm-harness-sandbox:test"
 
@@ -43,6 +45,65 @@ class DockerREPLConfigTests(unittest.TestCase):
                 "docker CLI not found; install Docker or run with --no-sandbox",
             ):
                 DockerREPL.build_image()
+
+    def test_subcall_model_override_is_temporary(self):
+        class CapturingClient(LMClient):
+            def __init__(self):
+                super().__init__(provider="stub", model="base-model")
+                self.seen_models = []
+
+            def complete(self, messages, max_tokens=512, temperature=0.2):
+                self.seen_models.append(self.model)
+                return Completion(
+                    content="ok",
+                    model=self.model,
+                    provider="test",
+                    latency_ms=0,
+                )
+
+        client = CapturingClient()
+        repl = DockerREPL(completion_client=client)
+
+        content = repl._complete_for_sandbox(
+            {
+                "query": "answer",
+                "context": "ctx",
+                "model": "special-model",
+                "max_tokens": 8,
+            },
+            recursive=False,
+        )
+
+        self.assertEqual(content, "ok")
+        self.assertEqual(client.seen_models, ["special-model"])
+        self.assertEqual(client.model, "base-model")
+
+    def test_file_slice_and_chunk_tools_page_large_context(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir).resolve()
+            target = workspace / "large.txt"
+            target.write_text("0123456789" * 100, encoding="utf-8")
+            old_workspace = sandbox_tools.WORKSPACE
+            sandbox_tools.WORKSPACE = workspace
+            try:
+                slice_payload = sandbox_tools.read_file_slice(
+                    "large.txt",
+                    start=10,
+                    max_bytes=15,
+                )
+                chunks = sandbox_tools.chunk_file(
+                    "large.txt",
+                    chunk_chars=12,
+                    max_chunks=3,
+                )
+            finally:
+                sandbox_tools.WORKSPACE = old_workspace
+
+        self.assertEqual(slice_payload["content"], "012345678901234")
+        self.assertEqual(slice_payload["start"], 10)
+        self.assertTrue(slice_payload["truncated"])
+        self.assertEqual([chunk["index"] for chunk in chunks], [0, 1, 2])
+        self.assertEqual(chunks[0]["content"], "012345678901")
 
 
 @unittest.skipUnless(docker_available(), "Docker daemon is not available")

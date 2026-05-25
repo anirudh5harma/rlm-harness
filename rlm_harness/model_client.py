@@ -76,22 +76,9 @@ class LMClient:
         )
 
     def _stub_rlm_response(self, user_text: str) -> str:
-        lower = user_text.lower()
-        if is_project_summary_prompt(lower):
-            code = (
-                "summary = project_summary()\n"
-                "answer['content'] = summary\n"
-                "answer['ready'] = True\n"
-                "print(summary)"
-            )
-        elif is_project_audit_prompt(lower):
-            code = (
-                "audit = project_audit()\n"
-                "answer['content'] = audit\n"
-                "answer['ready'] = True\n"
-                "print(audit)"
-            )
-        elif "list files" in lower or "list the files" in lower:
+        task_text = extract_labeled_section(user_text, "Query") or user_text
+        lower = task_text.lower()
+        if "list files" in lower or "list the files" in lower:
             code = (
                 "overview = project_overview()\n"
                 "print('\\n'.join(overview['files']))\n"
@@ -105,11 +92,28 @@ class LMClient:
                 "    write_file('mathlib.py', content.replace('return a - b', 'return a + b'))\n"
                 "result = run_shell('python -m unittest', timeout=30)\n"
                 "output = result['stdout'] + result['stderr']\n"
+                "print('Changed files: mathlib.py')\n"
+                "print('Verification: python -m unittest')\n"
                 "print(output, end='')\n"
                 "if result['returncode'] != 0:\n"
                 "    raise RuntimeError('tests failed')\n"
-                "answer['content'] = output\n"
+                "answer['content'] = 'Changed files: mathlib.py\\nVerification: "
+                "python -m unittest\\n' + output\n"
                 "answer['ready'] = True"
+            )
+        elif is_project_summary_prompt(lower):
+            code = (
+                "summary = project_summary()\n"
+                "answer['content'] = summary\n"
+                "answer['ready'] = True\n"
+                "print(summary)"
+            )
+        elif is_project_audit_prompt(lower):
+            code = (
+                "audit = project_audit()\n"
+                "answer['content'] = audit\n"
+                "answer['ready'] = True\n"
+                "print(audit)"
             )
         elif "summarize" in lower or "summary" in lower or "explain" in lower:
             code = (
@@ -301,6 +305,12 @@ def is_project_audit_prompt(lowered_user_text: str) -> bool:
             )
         )
     )
+
+
+def extract_labeled_section(text: str, label: str) -> str:
+    pattern = rf"(?is)\b{re.escape(label)}:\s*(.*?)(?:\n\s*\n|$)"
+    match = re.search(pattern, text)
+    return match.group(1).strip() if match else ""
 
 
 def _read_http_error_detail(exc: urllib.error.HTTPError, limit: int = 500) -> str:
