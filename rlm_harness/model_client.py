@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -76,7 +77,14 @@ class LMClient:
 
     def _stub_rlm_response(self, user_text: str) -> str:
         lower = user_text.lower()
-        if "list files" in lower or "list the files" in lower:
+        if is_project_summary_prompt(lower):
+            code = (
+                "summary = project_summary()\n"
+                "answer['content'] = summary\n"
+                "answer['ready'] = True\n"
+                "print(summary)"
+            )
+        elif "list files" in lower or "list the files" in lower:
             code = (
                 "overview = project_overview()\n"
                 "print('\\n'.join(overview['files']))\n"
@@ -114,7 +122,9 @@ class LMClient:
 
     def _stub_action(self, user_text: str) -> str:
         lower = user_text.lower()
-        if "list files" in lower or "list the files" in lower:
+        if is_project_summary_prompt(lower):
+            code = "print(project_summary())"
+        elif "list files" in lower or "list the files" in lower:
             code = (
                 "result = run_shell('find . -maxdepth 1 -mindepth 1 | sort')\n"
                 "print(result['stdout'].replace('./', ''), end='')\n"
@@ -207,6 +217,30 @@ class LMClient:
             completion_tokens=usage.get("completion_tokens"),
             raw=raw,
         )
+
+
+def is_project_summary_prompt(lowered_user_text: str) -> bool:
+    return (
+        bool(
+            re.search(
+                r"\b(project|repo|repository|codebase|workspace|application|app)\b",
+                lowered_user_text,
+            )
+        )
+        and any(
+            intent in lowered_user_text
+            for intent in (
+                "what is",
+                "what's",
+                "tell me about",
+                "summarize",
+                "summary",
+                "overview",
+                "explain",
+                "describe",
+            )
+        )
+    )
 
 
 def _read_http_error_detail(exc: urllib.error.HTTPError, limit: int = 500) -> str:

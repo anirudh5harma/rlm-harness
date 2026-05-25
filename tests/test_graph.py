@@ -9,6 +9,9 @@ from rlm_harness.graph.nodes import (
     GraphRuntimeConfig,
     Nodes,
     final_answer_from_action,
+    is_informational_task,
+    is_project_summary_task,
+    looks_like_source_dump,
     normalize_user_output,
     parse_numbered_plan,
     parse_python_action,
@@ -193,6 +196,112 @@ class GraphTests(unittest.TestCase):
         self.assertIn("Useful commands", answer)
         self.assertIn("npm run dev", answer)
         self.assertNotIn("{'files':", answer)
+
+    def test_what_is_this_project_is_project_summary_task(self):
+        self.assertTrue(is_project_summary_task("what is this project"))
+        self.assertTrue(is_informational_task("what is this project"))
+
+    def test_action_prompt_routes_project_summary_to_summary_tool(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            traces = TraceStore(Path(temp_dir) / "traces.db")
+            run_id = traces.start_run("what is this project", temp_dir)
+            state = HarnessState(
+                task="what is this project",
+                workspace=temp_dir,
+                thread_id=run_id,
+                run_id=run_id,
+                plan=["inspect the project"],
+            )
+            messages = Nodes(LMClient(provider="stub"), traces)._action_messages(state)
+
+        system_prompt = messages[0].content
+        self.assertIn("project_summary()", system_prompt)
+        self.assertIn("Never print raw source code", system_prompt)
+
+    def test_project_summary_reflects_source_dump_as_incomplete(self):
+        source_dump = "\n".join(
+            [
+                "from __future__ import annotations",
+                "import json",
+                "class Example:",
+                "    def method(self):",
+                "        if True:",
+                "            return 1",
+                "def other():",
+                "    return Example()",
+            ]
+        )
+        self.assertTrue(looks_like_source_dump(source_dump))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            traces = TraceStore(Path(temp_dir) / "traces.db")
+            run_id = traces.start_run("what is this project", temp_dir)
+            state = HarnessState(
+                task="what is this project",
+                workspace=temp_dir,
+                thread_id=run_id,
+                run_id=run_id,
+                history=[
+                    {
+                        "node": "observe",
+                        "content": render_observation(
+                            {
+                                "status": "ok",
+                                "stdout": source_dump,
+                                "stderr": "",
+                                "code": "print(read_file('app.py'))",
+                            }
+                        ),
+                    }
+                ],
+            )
+
+            final_state = Nodes(LMClient(provider="stub"), traces).reflect(state)
+
+        self.assertEqual(final_state.status, "continue")
+        self.assertFalse(final_state.final_answer)
+
+    def test_stopped_project_summary_source_dump_does_not_return_source(self):
+        source_dump = "\n".join(
+            [
+                "from __future__ import annotations",
+                "import json",
+                "class Example:",
+                "    def method(self):",
+                "        if True:",
+                "            return 1",
+                "def other():",
+                "    return Example()",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            traces = TraceStore(Path(temp_dir) / "traces.db")
+            run_id = traces.start_run("what is this project", temp_dir)
+            state = HarnessState(
+                task="what is this project",
+                workspace=temp_dir,
+                thread_id=run_id,
+                run_id=run_id,
+                history=[
+                    {
+                        "node": "observe",
+                        "content": render_observation(
+                            {
+                                "status": "ok",
+                                "stdout": source_dump,
+                                "stderr": "",
+                                "code": "print(read_file('app.py'))",
+                            }
+                        ),
+                    }
+                ],
+            )
+            runtime = GraphRuntimeConfig(max_iterations=1)
+
+            final_state = Nodes(LMClient(provider="stub"), traces, runtime).reflect(state)
+
+        self.assertEqual(final_state.status, "stopped")
+        self.assertIn("printed source code", final_state.final_answer)
+        self.assertNotIn("class Example", final_state.final_answer)
 
     def test_final_answer_does_not_expose_empty_sandbox_observation(self):
         answer = final_answer_from_action(

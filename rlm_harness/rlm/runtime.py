@@ -388,11 +388,17 @@ The REPL contains:
 - llm_query / llm_query_batched
 - rlm_query / rlm_query_batched
 - SHOW_VARS
+- When running in the sandbox, workspace tools such as project_summary,
+  project_overview, list_files, read_file, search_code, run_shell, and git_status
 
 Inspect context programmatically. Set answer['content'] and answer['ready'] = True
 when done. If you have enough information to answer after seeing observations,
 reply with the final user-facing answer in plain text and do not include another
 ```repl block.
+
+For project identity or overview questions such as "what is this project", call
+project_summary() when it is available and return that summary. Do not answer by
+printing raw source code.
 """
 
 

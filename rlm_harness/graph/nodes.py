@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -12,7 +13,11 @@ from rlm_harness.model_client import LMClient
 from rlm_harness.observability import maybe_traceable
 from rlm_harness.rlm import RLMRuntime
 from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, SandboxError
-from rlm_harness.sandbox.tools import TOOL_SCHEMAS
+from rlm_harness.sandbox.tools import (
+    TOOL_SCHEMAS,
+    is_project_overview_payload,
+    render_project_overview_summary,
+)
 from rlm_harness.tracing import TraceStore
 from rlm_harness.types import HarnessState, Msg
 
@@ -115,6 +120,8 @@ def observation_user_output(payload: dict) -> str:
 
 
 def is_informational_task(task: str) -> bool:
+    if is_project_summary_task(task):
+        return True
     terms = (
         "summarize",
         "summary",
@@ -128,6 +135,62 @@ def is_informational_task(task: str) -> bool:
     )
     lowered = task.lower()
     return any(term in lowered for term in terms)
+
+
+def is_project_summary_task(task: str) -> bool:
+    lowered = task.lower()
+    has_project_subject = bool(
+        re.search(r"\b(project|repo|repository|codebase|workspace|application|app)\b", lowered)
+    )
+    has_summary_intent = any(
+        term in lowered
+        for term in (
+            "what is",
+            "what's",
+            "tell me about",
+            "summarize",
+            "summary",
+            "overview",
+            "explain",
+            "describe",
+        )
+    )
+    return has_project_subject and has_summary_intent
+
+
+def looks_like_source_dump(output: str) -> bool:
+    lines = [line.rstrip() for line in output.splitlines() if line.strip()]
+    if len(lines) < 8:
+        return False
+    if output.count("```") >= 2:
+        return True
+    source_markers = (
+        "from __future__ import ",
+        "def ",
+        "class ",
+        "import ",
+        "return ",
+        "if __name__ == ",
+        "function ",
+        "const ",
+        "export ",
+    )
+    marker_hits = sum(
+        1
+        for line in lines
+        if line.lstrip().startswith(source_markers)
+        or re.match(r"^\s{2,}(if|for|while|return|try|except|with)\b", line)
+    )
+    return marker_hits >= 5 and marker_hits / len(lines) >= 0.25
+
+
+def looks_like_project_summary(output: str) -> bool:
+    lowered = output.lower()
+    return (
+        "project summary" in lowered
+        or "what it is:" in lowered
+        or ("tech stack:" in lowered and "files inspected:" in lowered)
+    )
 
 
 def is_retryable_observation(status: Optional[str]) -> bool:
@@ -384,8 +447,10 @@ class Nodes:
                     "do not only define unused functions, classes, or data structures. "
                     "Only call the listed tool functions; do not invent helper APIs. "
                     "README.md is optional; never assume it exists. For project summaries, "
-                    "call project_overview() first and summarize from its files, documents, "
-                    "git_status, and git_log. "
+                    "especially questions like 'what is this project', call project_summary() "
+                    "and print only that user-facing summary. If you need more detail, call "
+                    "project_overview() and summarize from its files, documents, git_status, "
+                    "and git_log. Never print raw source code for a project-summary answer. "
                     "When calling read_file, write_file, search_code, or git_diff, pass literal "
                     "non-empty workspace-relative string paths such as '.', 'pyproject.toml', "
                     "or 'src/app.py'. If you do not know the path, discover it first with "
@@ -430,6 +495,37 @@ class Nodes:
         state.scratch["graph_iterations"] = attempt
         last_observation = state.history[-1]["content"] if state.history else ""
         observation_payload = parse_observation_payload(last_observation)
+        if (
+            observation_payload
+            and observation_payload.get("status") == "ok"
+            and is_project_summary_task(state.task)
+        ):
+            user_output = observation_user_output(observation_payload)
+            if (
+                user_output
+                and looks_like_source_dump(user_output)
+                and not looks_like_project_summary(user_output)
+            ):
+                state.status = self._continue_or_stop(
+                    state,
+                    last_observation,
+                    "project-summary task printed source code instead of a project summary",
+                    include_last_answer=False,
+                )
+                self.traces.event(
+                    state.run_id,
+                    "reflection",
+                    {
+                        "decision": state.status,
+                        "content": (
+                            "project-summary task printed source code instead of a "
+                            "project summary"
+                        ),
+                    },
+                    node="reflect",
+                )
+                return state
+
         if (
             observation_payload
             and observation_payload.get("status") == "ok"
@@ -511,13 +607,18 @@ class Nodes:
         state: HarnessState,
         last_observation: str,
         reason: str,
+        include_last_answer: bool = True,
     ) -> str:
         if int(state.scratch.get("graph_iterations", 0)) >= self.runtime.max_iterations:
             state.final_answer = (
                 f"Stopped after {self.runtime.max_iterations} attempts. "
-                f"Last issue: {reason}\n\n"
-                f"{final_answer_from_action(last_observation, task=state.task)}"
+                f"Last issue: {reason}"
             )
+            if include_last_answer:
+                state.final_answer = (
+                    f"{state.final_answer}\n\n"
+                    f"{final_answer_from_action(last_observation, task=state.task)}"
+                )
             return "stopped"
         return "continue"
 
@@ -619,151 +720,6 @@ def parse_structured_output(output: str):
         return ast.literal_eval(stripped)
     except (ValueError, SyntaxError):
         return None
-
-
-def is_project_overview_payload(payload: dict) -> bool:
-    return isinstance(payload.get("files"), list) and isinstance(payload.get("documents"), list)
-
-
-def render_project_overview_summary(payload: dict) -> str:
-    files = [path for path in payload.get("files", []) if isinstance(path, str)]
-    documents = [doc for doc in payload.get("documents", []) if isinstance(doc, dict)]
-    doc_paths = [str(doc.get("path")) for doc in documents if doc.get("path")]
-    package = package_json_from_documents(documents)
-    scripts = package.get("scripts", {}) if package else {}
-    dependencies = package_dependencies(package)
-
-    sections = ["Project Summary"]
-    sections.append(f"Files inspected: {len(files)}")
-    if doc_paths:
-        sections.append("Key config/docs: " + ", ".join(doc_paths[:8]))
-
-    stack = infer_project_stack(files, documents, dependencies)
-    if stack:
-        sections.append("Tech stack: " + ", ".join(stack))
-
-    architecture = infer_project_architecture(files)
-    if architecture:
-        sections.append("Architecture: " + architecture)
-
-    commands = render_scripts(scripts)
-    if commands:
-        sections.append("Useful commands:\n" + commands)
-
-    git_status = str(payload.get("git_status") or "").strip()
-    if git_status:
-        sections.append("Working tree:\n" + git_status)
-
-    git_log = str(payload.get("git_log") or "").strip()
-    if git_log:
-        sections.append("Recent commits:\n" + "\n".join(git_log.splitlines()[:5]))
-
-    notable_files = notable_source_files(files)
-    if notable_files:
-        sections.append(
-            "Notable source files:\n" + "\n".join(f"- {path}" for path in notable_files)
-        )
-
-    return "\n\n".join(sections)
-
-
-def package_json_from_documents(documents: list[dict]) -> dict:
-    for doc in documents:
-        if doc.get("path") == "package.json" and isinstance(doc.get("content"), str):
-            try:
-                payload = json.loads(str(doc["content"]))
-            except json.JSONDecodeError:
-                return {}
-            return payload if isinstance(payload, dict) else {}
-    return {}
-
-
-def package_dependencies(package: dict) -> set[str]:
-    names: set[str] = set()
-    for section in ("dependencies", "devDependencies", "peerDependencies"):
-        values = package.get(section)
-        if isinstance(values, dict):
-            names.update(str(name) for name in values)
-    return names
-
-
-def infer_project_stack(
-    files: list[str],
-    documents: list[dict],
-    dependencies: set[str],
-) -> list[str]:
-    stack = []
-    if "package.json" in {doc.get("path") for doc in documents}:
-        stack.append("Node.js")
-    if "typescript" in dependencies or any(path.endswith((".ts", ".tsx")) for path in files):
-        stack.append("TypeScript")
-    if "react" in dependencies:
-        stack.append("React")
-    if "@tanstack/react-start" in dependencies:
-        stack.append("TanStack Start")
-    if "@tanstack/react-router" in dependencies:
-        stack.append("TanStack Router")
-    if "vite" in dependencies or "vite.config.ts" in files:
-        stack.append("Vite")
-    if "@tailwindcss/vite" in dependencies or "tailwindcss" in dependencies:
-        stack.append("Tailwind CSS")
-    if any(name.startswith("@radix-ui/") for name in dependencies):
-        stack.append("Radix UI")
-    if "pyproject.toml" in files:
-        stack.append("Python")
-    return dedupe(stack)
-
-
-def infer_project_architecture(files: list[str]) -> str:
-    details = []
-    if any(path.startswith("src/routes/") for path in files):
-        details.append("route modules under src/routes")
-    if any(path.startswith("src/components/ui/") for path in files):
-        details.append("shared UI primitives under src/components/ui")
-    if "src/router.tsx" in files:
-        details.append("router setup in src/router.tsx")
-    if "src/styles.css" in files:
-        details.append("global styles in src/styles.css")
-    if any(path.startswith("public/") for path in files):
-        details.append("static assets under public")
-    return "; ".join(details)
-
-
-def render_scripts(scripts: dict) -> str:
-    if not isinstance(scripts, dict):
-        return ""
-    preferred = ["dev", "build", "preview", "lint", "test"]
-    lines = []
-    for name in preferred:
-        command = scripts.get(name)
-        if isinstance(command, str):
-            lines.append(f"- npm run {name}: {command}")
-    return "\n".join(lines)
-
-
-def notable_source_files(files: list[str]) -> list[str]:
-    preferred = [
-        "package.json",
-        "pyproject.toml",
-        "src/routes/index.tsx",
-        "src/routes/__root.tsx",
-        "src/router.tsx",
-        "src/content.ts",
-        "src/styles.css",
-        "vite.config.ts",
-        "tsconfig.json",
-    ]
-    return [path for path in preferred if path in files][:8]
-
-
-def dedupe(values: list[str]) -> list[str]:
-    seen = set()
-    result = []
-    for value in values:
-        if value not in seen:
-            seen.add(value)
-            result.append(value)
-    return result
 
 
 def render_tool_list() -> str:

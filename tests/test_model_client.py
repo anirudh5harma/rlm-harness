@@ -1,6 +1,6 @@
 import json
-import urllib.error
 import unittest
+import urllib.error
 from io import BytesIO
 from unittest.mock import patch
 
@@ -83,6 +83,25 @@ class LMClientTests(unittest.TestCase):
                 "HTTP 403 Forbidden: model access denied",
             ):
                 client.complete([Msg(role="user", content="hello")])
+
+    def test_stub_project_question_uses_project_summary_tool(self):
+        client = LMClient(provider="stub")
+
+        completion = client.complete(
+            [
+                Msg(
+                    role="user",
+                    content=(
+                        "Return only valid JSON for this action.\n"
+                        "Task: what is this project"
+                    ),
+                )
+            ]
+        )
+
+        payload = json.loads(completion.content)
+        self.assertEqual(payload["type"], "python")
+        self.assertEqual(payload["code"], "print(project_summary())")
 
 
 if __name__ == "__main__":

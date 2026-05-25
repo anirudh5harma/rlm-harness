@@ -4,6 +4,7 @@ from pathlib import Path
 
 from rlm_harness.model_client import LMClient
 from rlm_harness.rlm.runtime import (
+    RLM_SYSTEM_PROMPT,
     RLMRuntime,
     build_bootstrap_code,
     find_repl_blocks,
@@ -104,6 +105,10 @@ class RLMRuntimeTests(unittest.TestCase):
         self.assertNotIn("```repl", answer)
         self.assertNotIn("print(context.keys())", answer)
         self.assertIn("stopped before producing a final answer", answer)
+
+    def test_rlm_prompt_routes_project_overview_to_summary_tool(self):
+        self.assertIn("project_summary", RLM_SYSTEM_PROMPT)
+        self.assertIn("Do not answer by\nprinting raw source code", RLM_SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":

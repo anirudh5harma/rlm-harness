@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
@@ -131,6 +132,278 @@ def project_overview(
     }
 
 
+def project_summary(
+    max_files: int = 300,
+    max_read_bytes: int = 12_000,
+) -> str:
+    return render_project_overview_summary(
+        project_overview(max_files=max_files, max_read_bytes=max_read_bytes)
+    )
+
+
+def is_project_overview_payload(payload: dict) -> bool:
+    return isinstance(payload.get("files"), list) and isinstance(payload.get("documents"), list)
+
+
+def render_project_overview_summary(payload: dict) -> str:
+    files = [path for path in payload.get("files", []) if isinstance(path, str)]
+    documents = [doc for doc in payload.get("documents", []) if isinstance(doc, dict)]
+    doc_paths = [str(doc.get("path")) for doc in documents if doc.get("path")]
+    package = package_json_from_documents(documents)
+    pyproject = pyproject_from_documents(documents)
+    scripts = package.get("scripts", {}) if package else {}
+    dependencies = package_dependencies(package)
+
+    sections = ["Project Summary"]
+    name = project_name(package, pyproject)
+    description = project_description(package, pyproject, documents)
+    if name or description:
+        if name and description:
+            sections.append(f"What it is: {name} - {description}")
+        elif name:
+            sections.append(f"What it is: {name}")
+        else:
+            sections.append(f"What it is: {description}")
+
+    sections.append(f"Files inspected: {len(files)}")
+    if doc_paths:
+        sections.append("Key config/docs: " + ", ".join(doc_paths[:8]))
+
+    stack = infer_project_stack(files, documents, dependencies)
+    if stack:
+        sections.append("Tech stack: " + ", ".join(stack))
+
+    architecture = infer_project_architecture(files)
+    if architecture:
+        sections.append("Architecture: " + architecture)
+
+    commands = render_scripts(scripts)
+    if commands:
+        sections.append("Useful commands:\n" + commands)
+
+    git_status_text = str(payload.get("git_status") or "").strip()
+    if git_status_text:
+        sections.append("Working tree:\n" + git_status_text)
+
+    git_log_text = str(payload.get("git_log") or "").strip()
+    if git_log_text:
+        sections.append("Recent commits:\n" + "\n".join(git_log_text.splitlines()[:5]))
+
+    notable_files = notable_source_files(files)
+    if notable_files:
+        sections.append(
+            "Notable source files:\n" + "\n".join(f"- {path}" for path in notable_files)
+        )
+
+    return "\n\n".join(sections)
+
+
+def package_json_from_documents(documents: list[dict]) -> dict:
+    for doc in documents:
+        if doc.get("path") == "package.json" and isinstance(doc.get("content"), str):
+            try:
+                payload = json.loads(str(doc["content"]))
+            except json.JSONDecodeError:
+                return {}
+            return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+def pyproject_from_documents(documents: list[dict]) -> dict:
+    for doc in documents:
+        if doc.get("path") == "pyproject.toml" and isinstance(doc.get("content"), str):
+            return parse_pyproject_metadata(str(doc["content"]))
+    return {}
+
+
+def parse_pyproject_metadata(content: str) -> dict:
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        tomllib = None
+
+    if tomllib is not None:
+        try:
+            payload = tomllib.loads(content)
+        except ValueError:
+            payload = {}
+        if isinstance(payload, dict):
+            project = payload.get("project")
+            return project if isinstance(project, dict) else {}
+
+    metadata: dict[str, str] = {}
+    in_project = False
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            in_project = line == "[project]"
+            continue
+        if not in_project or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("\"'")
+        if key in {"name", "description"} and value:
+            metadata[key] = value
+    return metadata
+
+
+def project_name(package: dict, pyproject: dict) -> str:
+    for payload in (package, pyproject):
+        name = payload.get("name") if isinstance(payload, dict) else None
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return ""
+
+
+def project_description(package: dict, pyproject: dict, documents: list[dict]) -> str:
+    for payload in (package, pyproject):
+        description = payload.get("description") if isinstance(payload, dict) else None
+        if isinstance(description, str) and description.strip():
+            return one_line(description)
+
+    readme = readme_content_from_documents(documents)
+    if readme:
+        return one_line(first_readme_paragraph(readme))
+    return ""
+
+
+def readme_content_from_documents(documents: list[dict]) -> str:
+    for doc in documents:
+        path = str(doc.get("path") or "").lower()
+        content = doc.get("content")
+        if path.startswith("readme") and isinstance(content, str):
+            return content
+    return ""
+
+
+def first_readme_paragraph(content: str) -> str:
+    lines = []
+    seen_heading = False
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if lines:
+                break
+            continue
+        if line.startswith("#"):
+            seen_heading = True
+            continue
+        if seen_heading or not lines:
+            lines.append(line)
+    return " ".join(lines)
+
+
+def one_line(text: str, max_chars: int = 240) -> str:
+    compact = re.sub(r"\s+", " ", text).strip()
+    if len(compact) <= max_chars:
+        return compact
+    return compact[: max_chars - 1].rstrip() + "..."
+
+
+def package_dependencies(package: dict) -> set[str]:
+    names: set[str] = set()
+    for section in ("dependencies", "devDependencies", "peerDependencies"):
+        values = package.get(section)
+        if isinstance(values, dict):
+            names.update(str(name) for name in values)
+    return names
+
+
+def infer_project_stack(
+    files: list[str],
+    documents: list[dict],
+    dependencies: set[str],
+) -> list[str]:
+    stack = []
+    if "package.json" in {doc.get("path") for doc in documents}:
+        stack.append("Node.js")
+    if "typescript" in dependencies or any(path.endswith((".ts", ".tsx")) for path in files):
+        stack.append("TypeScript")
+    if "react" in dependencies:
+        stack.append("React")
+    if "@tanstack/react-start" in dependencies:
+        stack.append("TanStack Start")
+    if "@tanstack/react-router" in dependencies:
+        stack.append("TanStack Router")
+    if "vite" in dependencies or "vite.config.ts" in files:
+        stack.append("Vite")
+    if "@tailwindcss/vite" in dependencies or "tailwindcss" in dependencies:
+        stack.append("Tailwind CSS")
+    if any(name.startswith("@radix-ui/") for name in dependencies):
+        stack.append("Radix UI")
+    if "pyproject.toml" in files:
+        stack.append("Python")
+    return dedupe(stack)
+
+
+def infer_project_architecture(files: list[str]) -> str:
+    details = []
+    if any(path.startswith("rlm_harness/graph/") for path in files):
+        details.append("graph orchestration under rlm_harness/graph")
+    if any(path.startswith("rlm_harness/sandbox/") for path in files):
+        details.append("sandbox execution under rlm_harness/sandbox")
+    if any(path.startswith("rlm_harness/rlm/") for path in files):
+        details.append("recursive runtime under rlm_harness/rlm")
+    if any(path.startswith("src/routes/") for path in files):
+        details.append("route modules under src/routes")
+    if any(path.startswith("src/components/ui/") for path in files):
+        details.append("shared UI primitives under src/components/ui")
+    if "src/router.tsx" in files:
+        details.append("router setup in src/router.tsx")
+    if "src/styles.css" in files:
+        details.append("global styles in src/styles.css")
+    if any(path.startswith("public/") for path in files):
+        details.append("static assets under public")
+    if any(path.startswith("tests/") for path in files):
+        details.append("test coverage under tests")
+    return "; ".join(details)
+
+
+def render_scripts(scripts: dict) -> str:
+    if not isinstance(scripts, dict):
+        return ""
+    preferred = ["dev", "build", "preview", "lint", "test"]
+    lines = []
+    for name in preferred:
+        command = scripts.get(name)
+        if isinstance(command, str):
+            lines.append(f"- npm run {name}: {command}")
+    return "\n".join(lines)
+
+
+def notable_source_files(files: list[str]) -> list[str]:
+    preferred = [
+        "package.json",
+        "pyproject.toml",
+        "README.md",
+        "rlm_harness/cli.py",
+        "rlm_harness/graph/nodes.py",
+        "rlm_harness/rlm/runtime.py",
+        "rlm_harness/sandbox/tools.py",
+        "src/routes/index.tsx",
+        "src/routes/__root.tsx",
+        "src/router.tsx",
+        "src/content.ts",
+        "src/styles.css",
+        "vite.config.ts",
+        "tsconfig.json",
+    ]
+    return [path for path in preferred if path in files][:8]
+
+
+def dedupe(values: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
 def write_file(path: str, content: str) -> str:
     target = workspace_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -243,6 +516,7 @@ def tool_names() -> list[str]:
         "read_first_existing",
         "list_files",
         "project_overview",
+        "project_summary",
         "write_file",
         "apply_patch",
         "run_shell",
@@ -322,6 +596,13 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "project_overview",
         "description": (
             "Return file list, common docs/config files, git status, and recent git log."
+        ),
+        "parameters": {"max_files": "optional file cap", "max_read_bytes": "optional per-file cap"},
+    },
+    {
+        "name": "project_summary",
+        "description": (
+            "Return a concise human-readable summary of what the workspace project is."
         ),
         "parameters": {"max_files": "optional file cap", "max_read_bytes": "optional per-file cap"},
     },
