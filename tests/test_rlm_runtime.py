@@ -108,7 +108,9 @@ class RLMRuntimeTests(unittest.TestCase):
 
     def test_rlm_prompt_routes_project_overview_to_summary_tool(self):
         self.assertIn("project_summary", RLM_SYSTEM_PROMPT)
+        self.assertIn("project_audit", RLM_SYSTEM_PROMPT)
         self.assertIn("Do not answer by\nprinting raw source code", RLM_SYSTEM_PROMPT)
+        self.assertIn("file inventory", RLM_SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":

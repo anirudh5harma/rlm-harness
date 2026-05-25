@@ -120,7 +120,7 @@ def observation_user_output(payload: dict) -> str:
 
 
 def is_informational_task(task: str) -> bool:
-    if is_project_summary_task(task):
+    if is_project_summary_task(task) or is_project_audit_task(task):
         return True
     terms = (
         "summarize",
@@ -132,6 +132,12 @@ def is_informational_task(task: str) -> bool:
         "inspect",
         "analyze",
         "analyse",
+        "find",
+        "identify",
+        "audit",
+        "review",
+        "evaluate",
+        "assess",
     )
     lowered = task.lower()
     return any(term in lowered for term in terms)
@@ -156,6 +162,42 @@ def is_project_summary_task(task: str) -> bool:
         )
     )
     return has_project_subject and has_summary_intent
+
+
+def is_project_audit_task(task: str) -> bool:
+    lowered = task.lower()
+    has_project_subject = bool(
+        re.search(r"\b(project|repo|repository|codebase|workspace|application|app)\b", lowered)
+    )
+    has_audit_intent = any(
+        term in lowered
+        for term in (
+            "gap",
+            "gaps",
+            "risk",
+            "risks",
+            "issue",
+            "issues",
+            "problem",
+            "problems",
+            "bug",
+            "bugs",
+            "flaw",
+            "flaws",
+            "weakness",
+            "weaknesses",
+            "technical debt",
+            "logical",
+            "audit",
+            "review",
+            "critique",
+            "evaluate",
+            "assess",
+            "find any",
+            "identify",
+        )
+    )
+    return has_project_subject and has_audit_intent
 
 
 def looks_like_source_dump(output: str) -> bool:
@@ -184,6 +226,23 @@ def looks_like_source_dump(output: str) -> bool:
     return marker_hits >= 5 and marker_hits / len(lines) >= 0.25
 
 
+def looks_like_file_inventory(output: str) -> bool:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(lines) < 8:
+        return False
+    if any(line.upper() in {"ALL FILES:", "FILES:"} for line in lines[:3]):
+        return True
+    path_like = 0
+    for line in lines:
+        if len(line) > 180 or " " in line or "\t" in line:
+            continue
+        if re.match(r"^[A-Za-z0-9_./@:+-]+$", line) and (
+            "/" in line or "." in Path(line).name
+        ):
+            path_like += 1
+    return path_like >= 8 and path_like / len(lines) >= 0.75
+
+
 def looks_like_project_summary(output: str) -> bool:
     lowered = output.lower()
     return (
@@ -191,6 +250,29 @@ def looks_like_project_summary(output: str) -> bool:
         or "what it is:" in lowered
         or ("tech stack:" in lowered and "files inspected:" in lowered)
     )
+
+
+def looks_like_project_audit(output: str) -> bool:
+    lowered = output.lower()
+    has_audit_language = any(
+        term in lowered
+        for term in (
+            "finding",
+            "findings",
+            "gap",
+            "gaps",
+            "risk",
+            "risks",
+            "issue",
+            "issues",
+            "impact:",
+            "recommendation:",
+        )
+    )
+    has_evidence = "evidence:" in lowered or bool(
+        re.search(r"\b[\w./-]+\.(py|ts|tsx|js|jsx|json|toml|md|css|yml|yaml)\b", output)
+    )
+    return has_audit_language and has_evidence and not looks_like_file_inventory(output)
 
 
 def is_retryable_observation(status: Optional[str]) -> bool:
@@ -451,6 +533,12 @@ class Nodes:
                     "and print only that user-facing summary. If you need more detail, call "
                     "project_overview() and summarize from its files, documents, git_status, "
                     "and git_log. Never print raw source code for a project-summary answer. "
+                    "For project audit, review, risk, issue, or gap-analysis tasks, do not "
+                    "answer with list_files(), project_overview(), or an ALL FILES inventory "
+                    "alone. Call project_audit() as a baseline, inspect relevant config and "
+                    "source files with read_file/search_code, and print findings with evidence, "
+                    "impact, and recommendations. Use rlm.completion with the collected context "
+                    "when the task asks for logical or technical analysis beyond simple facts. "
                     "When calling read_file, write_file, search_code, or git_diff, pass literal "
                     "non-empty workspace-relative string paths such as '.', 'pyproject.toml', "
                     "or 'src/app.py'. If you do not know the path, discover it first with "
@@ -520,6 +608,36 @@ class Nodes:
                         "content": (
                             "project-summary task printed source code instead of a "
                             "project summary"
+                        ),
+                    },
+                    node="reflect",
+                )
+                return state
+
+        if (
+            observation_payload
+            and observation_payload.get("status") == "ok"
+            and is_project_audit_task(state.task)
+        ):
+            user_output = observation_user_output(observation_payload)
+            if user_output and (
+                looks_like_file_inventory(user_output)
+                or looks_like_source_dump(user_output)
+                or not looks_like_project_audit(user_output)
+            ):
+                state.status = self._continue_or_stop(
+                    state,
+                    last_observation,
+                    "project-audit task did not produce evidence-backed findings",
+                    include_last_answer=False,
+                )
+                self.traces.event(
+                    state.run_id,
+                    "reflection",
+                    {
+                        "decision": state.status,
+                        "content": (
+                            "project-audit task did not produce evidence-backed findings"
                         ),
                     },
                     node="reflect",

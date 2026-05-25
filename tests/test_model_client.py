@@ -103,6 +103,26 @@ class LMClientTests(unittest.TestCase):
         self.assertEqual(payload["type"], "python")
         self.assertEqual(payload["code"], "print(project_summary())")
 
+    def test_stub_project_gap_question_uses_project_audit_tool(self):
+        client = LMClient(provider="stub")
+
+        completion = client.complete(
+            [
+                Msg(
+                    role="user",
+                    content=(
+                        "Return only valid JSON for this action.\n"
+                        "Task: find any logical and technical gaps in this project"
+                    ),
+                )
+            ]
+        )
+
+        payload = json.loads(completion.content)
+        self.assertEqual(payload["type"], "python")
+        self.assertIn("project_audit()", payload["code"])
+        self.assertIn("rlm.completion", payload["code"])
+
 
 if __name__ == "__main__":
     unittest.main()

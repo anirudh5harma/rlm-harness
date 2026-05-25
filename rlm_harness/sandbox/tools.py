@@ -141,6 +141,15 @@ def project_summary(
     )
 
 
+def project_audit(
+    max_files: int = 500,
+    max_read_bytes: int = 16_000,
+) -> str:
+    return render_project_audit(
+        project_overview(max_files=max_files, max_read_bytes=max_read_bytes)
+    )
+
+
 def is_project_overview_payload(payload: dict) -> bool:
     return isinstance(payload.get("files"), list) and isinstance(payload.get("documents"), list)
 
@@ -196,6 +205,235 @@ def render_project_overview_summary(payload: dict) -> str:
         )
 
     return "\n\n".join(sections)
+
+
+def render_project_audit(payload: dict) -> str:
+    files = [path for path in payload.get("files", []) if isinstance(path, str)]
+    documents = [doc for doc in payload.get("documents", []) if isinstance(doc, dict)]
+    package = package_json_from_documents(documents)
+    pyproject = pyproject_from_documents(documents)
+    dependencies = package_dependencies(package)
+    scripts = package.get("scripts", {}) if package else {}
+    stack = infer_project_stack(files, documents, dependencies)
+    findings = project_audit_findings(files, documents, package, pyproject)
+
+    sections = ["Project Gap Analysis"]
+    summary = project_description(package, pyproject, documents)
+    if summary:
+        sections.append("Context: " + summary)
+    if stack:
+        sections.append("Detected stack: " + ", ".join(stack))
+
+    reviewed = audit_reviewed_paths(files, documents)
+    if reviewed:
+        sections.append("Evidence reviewed:\n" + "\n".join(f"- {path}" for path in reviewed))
+
+    if findings:
+        rendered_findings = []
+        for index, finding in enumerate(findings, start=1):
+            rendered_findings.append(
+                "\n".join(
+                    [
+                        f"{index}. [{finding['severity']}] {finding['title']}",
+                        f"   Evidence: {finding['evidence']}",
+                        f"   Impact: {finding['impact']}",
+                        f"   Recommendation: {finding['recommendation']}",
+                    ]
+                )
+            )
+        sections.append("Findings:\n" + "\n\n".join(rendered_findings))
+    else:
+        sections.append(
+            "Findings:\n"
+            "No obvious structural gaps were detected from the high-level project files. "
+            "A stronger audit should still inspect feature code, run the test suite, and "
+            "exercise the main user workflows."
+        )
+
+    commands = audit_verification_commands(scripts, files)
+    if commands:
+        sections.append("Suggested verification:\n" + "\n".join(f"- {cmd}" for cmd in commands))
+
+    return "\n\n".join(sections)
+
+
+def project_audit_findings(
+    files: list[str],
+    documents: list[dict],
+    package: dict,
+    pyproject: dict,
+) -> list[dict[str, str]]:
+    findings: list[dict[str, str]] = []
+    scripts = package.get("scripts", {}) if package else {}
+    dependencies = package_dependencies(package)
+    frontend = bool(package) or any(path.startswith("src/") for path in files)
+    python_project = bool(pyproject) or "pyproject.toml" in files
+
+    if frontend and not has_test_surface(files, scripts):
+        findings.append(
+            audit_finding(
+                "high",
+                "No visible automated test surface",
+                "package.json does not expose a test script and no common test files were found.",
+                "Logical regressions in routes, state, and UI behavior can ship without a fast "
+                "feedback loop.",
+                "Add focused unit/component tests for core behavior and expose them through "
+                "npm run test or an equivalent CI command.",
+            )
+        )
+
+    if python_project and not has_python_test_surface(files):
+        findings.append(
+            audit_finding(
+                "high",
+                "No visible Python test coverage",
+                "pyproject.toml is present but no tests/ directory or test_*.py files were found.",
+                "Harness, CLI, or runtime changes can regress without an executable safety net.",
+                "Add tests for the main runtime paths and document the command in project "
+                "metadata.",
+            )
+        )
+
+    if frontend and "build" not in scripts:
+        findings.append(
+            audit_finding(
+                "medium",
+                "Build command is not discoverable",
+                "package.json does not define a build script.",
+                "Deployments and local verification depend on undocumented knowledge.",
+                "Add a package.json build script that matches the deployment target.",
+            )
+        )
+
+    if frontend and "lint" not in scripts:
+        findings.append(
+            audit_finding(
+                "medium",
+                "Static analysis command is not discoverable",
+                "package.json does not define a lint script.",
+                "Type, import, accessibility, and style regressions are harder to catch "
+                "consistently.",
+                "Expose linting or typechecking through package scripts and run it in CI.",
+            )
+        )
+
+    if frontend and "typescript" in dependencies and not has_typecheck_script(scripts):
+        findings.append(
+            audit_finding(
+                "medium",
+                "TypeScript typechecking is not a first-class script",
+                "TypeScript is used, but package.json has no typecheck script.",
+                "Build tools can miss or delay some project-wide type errors depending on the "
+                "framework pipeline.",
+                "Add a typecheck script such as tsc --noEmit, or document why the build command "
+                "is sufficient.",
+            )
+        )
+
+    if frontend and "public/placeholder.svg" in files:
+        findings.append(
+            audit_finding(
+                "low",
+                "Placeholder asset remains in the public bundle",
+                "public/placeholder.svg is present.",
+                "Generated starter assets can leak into production or mask missing final assets.",
+                "Remove the placeholder or replace it with an intentional product asset.",
+            )
+        )
+
+    if frontend and has_many_ui_primitives(files) and not has_domain_component_layer(files):
+        findings.append(
+            audit_finding(
+                "medium",
+                "UI primitive layer is present without an obvious domain component layer",
+                "Many src/components/ui/* files exist, but no non-primitive component directory "
+                "was found.",
+                "Application behavior may be concentrated in routes, making reuse and testing "
+                "harder as the project grows.",
+                "Extract domain components for repeated workflows and test them directly.",
+            )
+        )
+
+    if frontend and "eslint.config.js" in files and "lint" not in scripts:
+        findings.append(
+            audit_finding(
+                "low",
+                "ESLint config exists but is not wired into scripts",
+                "eslint.config.js exists while package.json has no lint script.",
+                "Developers may skip static analysis because the expected command is unclear.",
+                "Add a lint script that invokes ESLint over the source tree.",
+            )
+        )
+
+    if not has_readme(documents):
+        findings.append(
+            audit_finding(
+                "medium",
+                "Project documentation is missing or not detected",
+                "No README file was found among the inspected project documents.",
+                "Setup, architecture, and operational assumptions become implicit and harder to "
+                "audit.",
+                "Add a README with purpose, setup, verification commands, and deployment notes.",
+            )
+        )
+
+    if "vercel.json" in files and "build-vercel.mjs" in files and frontend:
+        findings.append(
+            audit_finding(
+                "low",
+                "Deployment has a custom build path that deserves verification",
+                "vercel.json and build-vercel.mjs are both present.",
+                "Custom deployment glue can diverge from local build behavior.",
+                "Run the Vercel build command locally and document how it differs from npm run "
+                "build.",
+            )
+        )
+
+    return findings
+
+
+def audit_finding(
+    severity: str,
+    title: str,
+    evidence: str,
+    impact: str,
+    recommendation: str,
+) -> dict[str, str]:
+    return {
+        "severity": severity,
+        "title": title,
+        "evidence": evidence,
+        "impact": impact,
+        "recommendation": recommendation,
+    }
+
+
+def audit_reviewed_paths(files: list[str], documents: list[dict]) -> list[str]:
+    doc_paths = [str(doc.get("path")) for doc in documents if doc.get("path")]
+    preferred = [
+        *doc_paths,
+        "src/routes/index.tsx",
+        "src/routes/__root.tsx",
+        "src/router.tsx",
+        "src/content.ts",
+        "src/styles.css",
+        "rlm_harness/cli.py",
+        "rlm_harness/graph/nodes.py",
+        "rlm_harness/rlm/runtime.py",
+        "rlm_harness/sandbox/tools.py",
+    ]
+    return [path for path in dedupe(preferred) if path in files][:12]
+
+
+def audit_verification_commands(scripts: dict, files: list[str]) -> list[str]:
+    commands = []
+    if isinstance(scripts, dict):
+        for name in ("test", "lint", "typecheck", "build"):
+            if isinstance(scripts.get(name), str):
+                commands.append(f"npm run {name}")
+    if "pyproject.toml" in files and any(path.startswith("tests/") for path in files):
+        commands.append("pytest")
+    return commands
 
 
 def package_json_from_documents(documents: list[dict]) -> dict:
@@ -394,6 +632,58 @@ def notable_source_files(files: list[str]) -> list[str]:
     return [path for path in preferred if path in files][:8]
 
 
+def has_test_surface(files: list[str], scripts: dict) -> bool:
+    if isinstance(scripts.get("test"), str):
+        return True
+    test_markers = (
+        ".test.",
+        ".spec.",
+        "__tests__/",
+        "tests/",
+        "vitest.config.",
+        "jest.config.",
+        "playwright.config.",
+        "cypress.config.",
+    )
+    return any(any(marker in path for marker in test_markers) for path in files)
+
+
+def has_python_test_surface(files: list[str]) -> bool:
+    return any(
+        path.startswith("tests/")
+        or path.endswith("_test.py")
+        or Path(path).name.startswith("test_")
+        for path in files
+    )
+
+
+def has_typecheck_script(scripts: dict) -> bool:
+    for name, command in scripts.items():
+        if not isinstance(name, str) or not isinstance(command, str):
+            continue
+        lowered = f"{name} {command}".lower()
+        if "typecheck" in lowered or "tsc --noemit" in lowered or "tsc --no-emit" in lowered:
+            return True
+    return False
+
+
+def has_many_ui_primitives(files: list[str]) -> bool:
+    return sum(1 for path in files if path.startswith("src/components/ui/")) >= 8
+
+
+def has_domain_component_layer(files: list[str]) -> bool:
+    return any(
+        path.startswith("src/components/")
+        and not path.startswith("src/components/ui/")
+        and path.endswith((".ts", ".tsx", ".js", ".jsx"))
+        for path in files
+    )
+
+
+def has_readme(documents: list[dict]) -> bool:
+    return any(str(doc.get("path") or "").lower().startswith("readme") for doc in documents)
+
+
 def dedupe(values: list[str]) -> list[str]:
     seen = set()
     result = []
@@ -517,6 +807,7 @@ def tool_names() -> list[str]:
         "list_files",
         "project_overview",
         "project_summary",
+        "project_audit",
         "write_file",
         "apply_patch",
         "run_shell",
@@ -603,6 +894,14 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "project_summary",
         "description": (
             "Return a concise human-readable summary of what the workspace project is."
+        ),
+        "parameters": {"max_files": "optional file cap", "max_read_bytes": "optional per-file cap"},
+    },
+    {
+        "name": "project_audit",
+        "description": (
+            "Return an evidence-backed gap analysis for project review, audit, risk, or "
+            "technical-debt questions."
         ),
         "parameters": {"max_files": "optional file cap", "max_read_bytes": "optional per-file cap"},
     },

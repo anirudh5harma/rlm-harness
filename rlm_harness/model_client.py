@@ -84,6 +84,13 @@ class LMClient:
                 "answer['ready'] = True\n"
                 "print(summary)"
             )
+        elif is_project_audit_prompt(lower):
+            code = (
+                "audit = project_audit()\n"
+                "answer['content'] = audit\n"
+                "answer['ready'] = True\n"
+                "print(audit)"
+            )
         elif "list files" in lower or "list the files" in lower:
             code = (
                 "overview = project_overview()\n"
@@ -124,6 +131,20 @@ class LMClient:
         lower = user_text.lower()
         if is_project_summary_prompt(lower):
             code = "print(project_summary())"
+        elif is_project_audit_prompt(lower):
+            code = (
+                "baseline = project_audit()\n"
+                "try:\n"
+                "    analysis = rlm.completion(\n"
+                "        'Find logical and technical gaps in this project. Use the baseline "
+                "audit as evidence and return concise findings with recommendations.',\n"
+                "        baseline,\n"
+                "        depth_hint=1,\n"
+                "    )\n"
+                "    print(analysis if analysis.strip() else baseline)\n"
+                "except Exception:\n"
+                "    print(baseline)"
+            )
         elif "list files" in lower or "list the files" in lower:
             code = (
                 "result = run_shell('find . -maxdepth 1 -mindepth 1 | sort')\n"
@@ -238,6 +259,45 @@ def is_project_summary_prompt(lowered_user_text: str) -> bool:
                 "overview",
                 "explain",
                 "describe",
+            )
+        )
+    )
+
+
+def is_project_audit_prompt(lowered_user_text: str) -> bool:
+    return (
+        bool(
+            re.search(
+                r"\b(project|repo|repository|codebase|workspace|application|app)\b",
+                lowered_user_text,
+            )
+        )
+        and any(
+            intent in lowered_user_text
+            for intent in (
+                "gap",
+                "gaps",
+                "risk",
+                "risks",
+                "issue",
+                "issues",
+                "problem",
+                "problems",
+                "bug",
+                "bugs",
+                "flaw",
+                "flaws",
+                "weakness",
+                "weaknesses",
+                "technical debt",
+                "logical",
+                "audit",
+                "review",
+                "critique",
+                "evaluate",
+                "assess",
+                "find any",
+                "identify",
             )
         )
     )

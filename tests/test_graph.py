@@ -10,7 +10,10 @@ from rlm_harness.graph.nodes import (
     Nodes,
     final_answer_from_action,
     is_informational_task,
+    is_project_audit_task,
     is_project_summary_task,
+    looks_like_file_inventory,
+    looks_like_project_audit,
     looks_like_source_dump,
     normalize_user_output,
     parse_numbered_plan,
@@ -20,6 +23,7 @@ from rlm_harness.graph.nodes import (
 from rlm_harness.memory import Memory, MemoryPagingConfig
 from rlm_harness.model_client import LMClient
 from rlm_harness.sandbox import DockerREPL, SandboxConfig
+from rlm_harness.sandbox import tools as sandbox_tools
 from rlm_harness.tracing import TraceStore
 from rlm_harness.types import Completion, HarnessState
 
@@ -201,6 +205,12 @@ class GraphTests(unittest.TestCase):
         self.assertTrue(is_project_summary_task("what is this project"))
         self.assertTrue(is_informational_task("what is this project"))
 
+    def test_project_gap_prompt_is_audit_task(self):
+        task = "find any logical and technical gaps in this project"
+
+        self.assertTrue(is_project_audit_task(task))
+        self.assertTrue(is_informational_task(task))
+
     def test_action_prompt_routes_project_summary_to_summary_tool(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             traces = TraceStore(Path(temp_dir) / "traces.db")
@@ -217,6 +227,98 @@ class GraphTests(unittest.TestCase):
         system_prompt = messages[0].content
         self.assertIn("project_summary()", system_prompt)
         self.assertIn("Never print raw source code", system_prompt)
+
+    def test_action_prompt_routes_project_audit_to_audit_tool(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            traces = TraceStore(Path(temp_dir) / "traces.db")
+            task = "find any logical and technical gaps in this project"
+            run_id = traces.start_run(task, temp_dir)
+            state = HarnessState(
+                task=task,
+                workspace=temp_dir,
+                thread_id=run_id,
+                run_id=run_id,
+                plan=["inspect the project"],
+            )
+            messages = Nodes(LMClient(provider="stub"), traces)._action_messages(state)
+
+        system_prompt = messages[0].content
+        self.assertIn("project_audit()", system_prompt)
+        self.assertIn("evidence, impact, and recommendations", system_prompt)
+        self.assertIn("ALL FILES inventory", system_prompt)
+
+    def test_project_audit_reflects_file_inventory_as_incomplete(self):
+        file_inventory = "\n".join(
+            [
+                "ALL FILES:",
+                ".gitignore",
+                "package.json",
+                "tsconfig.json",
+                "vite.config.ts",
+                "src/content.ts",
+                "src/router.tsx",
+                "src/routes/index.tsx",
+                "src/components/ui/button.tsx",
+                "src/styles.css",
+            ]
+        )
+        self.assertTrue(looks_like_file_inventory(file_inventory))
+        self.assertFalse(looks_like_project_audit(file_inventory))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            traces = TraceStore(Path(temp_dir) / "traces.db")
+            task = "find any logical and technical gaps in this project"
+            run_id = traces.start_run(task, temp_dir)
+            state = HarnessState(
+                task=task,
+                workspace=temp_dir,
+                thread_id=run_id,
+                run_id=run_id,
+                history=[
+                    {
+                        "node": "observe",
+                        "content": render_observation(
+                            {
+                                "status": "ok",
+                                "stdout": file_inventory,
+                                "stderr": "",
+                                "code": "print('\\n'.join(list_files()))",
+                            }
+                        ),
+                    }
+                ],
+            )
+
+            final_state = Nodes(LMClient(provider="stub"), traces).reflect(state)
+
+        self.assertEqual(final_state.status, "continue")
+        self.assertFalse(final_state.final_answer)
+
+    def test_project_audit_returns_evidence_backed_findings(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir).resolve()
+            (workspace / "package.json").write_text(
+                (
+                    '{"dependencies":{"react":"^19.0.0","typescript":"^5.0.0"},'
+                    '"scripts":{"build":"vite build"}}'
+                ),
+                encoding="utf-8",
+            )
+            (workspace / "src" / "routes").mkdir(parents=True)
+            (workspace / "src" / "routes" / "index.tsx").write_text(
+                "export default function Index() { return <main>Hello</main> }\n",
+                encoding="utf-8",
+            )
+            old_workspace = sandbox_tools.WORKSPACE
+            sandbox_tools.WORKSPACE = workspace
+            try:
+                audit = sandbox_tools.project_audit()
+            finally:
+                sandbox_tools.WORKSPACE = old_workspace
+
+        self.assertIn("Project Gap Analysis", audit)
+        self.assertIn("Findings", audit)
+        self.assertIn("Evidence:", audit)
+        self.assertIn("Recommendation:", audit)
 
     def test_project_summary_reflects_source_dump_as_incomplete(self):
         source_dump = "\n".join(
