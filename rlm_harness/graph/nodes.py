@@ -199,7 +199,19 @@ class Nodes:
                 ),
             ),
         ]
-        completion = self.client.complete(messages, max_tokens=600, temperature=0.1)
+        try:
+            completion = self.client.complete(messages, max_tokens=600, temperature=0.1)
+        except Exception as exc:
+            from rlm_harness.types import PlanStep
+            state.plan = TaskPlan(steps=[PlanStep(id="1", description="Respond to the task")], current_step_id="1")
+            state.history.append({"node": "plan", "content": f"plan: Respond to the task"})
+            self.traces.event(
+                state.run_id,
+                "plan_error",
+                {"error": str(exc), "type": type(exc).__name__},
+                node="plan",
+            )
+            return state
         state.plan = parse_numbered_plan(completion.content)
         if self.runtime.max_iterations < 6:
             from rlm_harness.graph.task_policy import default_max_iterations_for_complexity
@@ -253,7 +265,18 @@ class Nodes:
                 ),
             ),
         ]
-        completion = self.client.complete(messages, max_tokens=700, temperature=0.2)
+        try:
+            completion = self.client.complete(messages, max_tokens=700, temperature=0.2)
+        except Exception as exc:
+            state.scratch["last_action"] = json.dumps({"status": "error", "stderr": f"LLM: {type(exc).__name__}: {exc}"})
+            state.history.append({"node": "act", "content": f"model error: {exc}"})
+            self.traces.event(
+                state.run_id,
+                "model_error",
+                {"error": str(exc), "type": type(exc).__name__},
+                node="act",
+            )
+            return state
         state.scratch["last_action"] = completion.content
         state.history.append({"node": "act", "content": completion.content})
         self.traces.event(
@@ -273,47 +296,77 @@ class Nodes:
         sandbox_config = self.runtime.sandbox_config or SandboxConfig(
             workspace=Path(state.workspace)
         )
-        runtime = RLMRuntime(
-            self.client,
-            workspace=Path(state.workspace),
-            max_iterations=self.runtime.max_iterations,
-            max_depth=(self.runtime.subcall_config.max_depth if self.runtime.subcall_config else 3),
-            sandbox_enabled=True,
-            sandbox_config=sandbox_config,
-            subcall_config=self.runtime.subcall_config,
-        )
-        context = rlm_action_context(state, sandbox_config.mount_path)
-        result = runtime.completion(state.task, context=context)
-        final_answer = fallback_project_answer_if_needed(
-            state.task,
-            result.final_answer,
-            Path(state.workspace),
-            result.status,
-        )
-        observation = {
-            "status": "ok" if final_answer else result.status,
-            "stdout": final_answer or result.final_answer,
-            "stderr": "\n".join(obs.stderr for obs in result.observations if obs.stderr),
-            "timed_out": any(obs.timed_out for obs in result.observations),
-            "elapsed_ms": sum(obs.elapsed_ms for obs in result.observations),
-            "subcalls": result.subcalls,
-            "tokens_used": result.tokens_used,
-            "iterations": result.iterations,
-            "engine": "rlm",
-        }
+        try:
+            runtime = RLMRuntime(
+                self.client,
+                workspace=Path(state.workspace),
+                max_iterations=self.runtime.max_iterations,
+                max_depth=(self.runtime.subcall_config.max_depth if self.runtime.subcall_config else 3),
+                sandbox_enabled=True,
+                sandbox_config=sandbox_config,
+                subcall_config=self.runtime.subcall_config,
+            )
+            context = rlm_action_context(state, sandbox_config.mount_path)
+            result = runtime.completion(state.task, context=context)
+            final_answer = fallback_project_answer_if_needed(
+                state.task,
+                result.final_answer,
+                Path(state.workspace),
+                result.status,
+            )
+            observation = {
+                "status": "ok" if final_answer else result.status,
+                "stdout": final_answer or result.final_answer,
+                "stderr": "\n".join(obs.stderr for obs in result.observations if obs.stderr),
+                "timed_out": any(obs.timed_out for obs in result.observations),
+                "elapsed_ms": sum(obs.elapsed_ms for obs in result.observations),
+                "subcalls": result.subcalls,
+                "tokens_used": result.tokens_used,
+                "iterations": result.iterations,
+                "engine": "rlm",
+            }
+        except SandboxError as exc:
+            observation = {
+                "status": "sandbox_error",
+                "stdout": "",
+                "stderr": str(exc),
+                "timed_out": False,
+                "elapsed_ms": 0,
+            }
+            self.traces.event(
+                state.run_id,
+                "rlm_runtime_error",
+                {"error": str(exc)},
+                node="act",
+            )
+        except Exception as exc:
+            observation = {
+                "status": "error",
+                "stdout": "",
+                "stderr": f"{type(exc).__name__}: {exc}",
+                "timed_out": False,
+                "elapsed_ms": 0,
+            }
+            self.traces.event(
+                state.run_id,
+                "rlm_runtime_error",
+                {"error": str(exc), "type": type(exc).__name__},
+                node="act",
+            )
+        else:
+            self.traces.event(
+                state.run_id,
+                "rlm_runtime",
+                {
+                    **observation,
+                    "responses": result.responses,
+                    "observations": [obs.__dict__ for obs in result.observations],
+                },
+                node="act",
+            )
         rendered = render_observation(observation)
         state.scratch["last_action"] = rendered
         state.history.append({"node": "act", "content": rendered})
-        self.traces.event(
-            state.run_id,
-            "rlm_runtime",
-            {
-                **observation,
-                "responses": result.responses,
-                "observations": [obs.__dict__ for obs in result.observations],
-            },
-            node="act",
-        )
         return state
 
     def _select_sandbox_action(self, state: HarnessState) -> HarnessState:
@@ -322,7 +375,25 @@ class Nodes:
 
         for attempt in range(self.runtime.max_action_retries + 1):
             messages = self._action_messages(state, parse_error=parse_error)
-            completion = self.client.complete(messages, max_tokens=900, temperature=0.1)
+            try:
+                completion = self.client.complete(messages, max_tokens=900, temperature=0.1)
+            except Exception as exc:
+                observation = {
+                    "status": "error",
+                    "stdout": "",
+                    "stderr": f"LLM call failed: {type(exc).__name__}: {exc}",
+                    "action": "",
+                }
+                rendered = render_observation(observation)
+                state.scratch["last_action"] = rendered
+                state.history.append({"node": "act", "content": rendered})
+                self.traces.event(
+                    state.run_id,
+                    "model_error",
+                    {"error": str(exc), "type": type(exc).__name__},
+                    node="act",
+                )
+                return state
             action_content = completion.content
             self.traces.event(
                 state.run_id,
@@ -585,7 +656,18 @@ class Nodes:
                 ),
             ),
         ]
-        completion = self.client.complete(messages, max_tokens=20, temperature=0)
+        try:
+            completion = self.client.complete(messages, max_tokens=20, temperature=0)
+        except Exception as exc:
+            self.traces.event(
+                state.run_id,
+                "reflection",
+                {"decision": "error", "content": str(exc)},
+                node="reflect",
+            )
+            state.status = "error"
+            state.final_answer = final_answer_from_action(last_observation, task=state.task)
+            return state
         decision = "done" if "done" in completion.content.lower() else "continue"
         if decision == "done":
             return self.done(state)
@@ -834,7 +916,21 @@ class Nodes:
                 ),
             ),
         ]
-        completion = self.client.complete(messages, max_tokens=300, temperature=0.1)
+        try:
+            completion = self.client.complete(messages, max_tokens=300, temperature=0.1)
+        except Exception as exc:
+            state.final_answer = (
+                f"Budget exhausted after completing {len(completed)}/{len(completed) + len(pending)} steps. "
+                f"Partial results: {'; '.join(completed_desc[:5])}"
+            )
+            state.status = "stopped"
+            self.traces.event(
+                state.run_id,
+                "finalize_partial_error",
+                {"error": str(exc)},
+                node="reflect",
+            )
+            return state
         state.final_answer = completion.content
         state.status = "stopped"
         self.traces.event(
