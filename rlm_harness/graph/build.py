@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from rlm_harness.graph.nodes import Nodes
+from rlm_harness.graph.task_policy import is_code_editing_task
 from rlm_harness.types import HarnessState
 
 
@@ -20,9 +21,15 @@ class HarnessGraph:
         loops = 0
         while loops < self.max_loops:
             loops += 1
+            state.budget.iterations_used = loops
+            if state.budget.is_exhausted and state.status != "done":
+                state = self.nodes.finalize_partial(state)
+                return state
             state = self.nodes.act(state)
             state = self.nodes.memory_write(state)
             state = self.nodes.execute_action(state)
+            state = self.nodes.memory_write(state)
+            state = self.nodes.verify(state)
             state = self.nodes.memory_write(state)
             state = self.nodes.observe(state)
             state = self.nodes.memory_write(state)
@@ -84,6 +91,8 @@ def _build_langgraph(nodes: Nodes, checkpoint_path: Optional[Path] = None):
     graph.add_node("memory_after_act", nodes.memory_write)
     graph.add_node("execute_action", nodes.execute_action)
     graph.add_node("memory_after_execute", nodes.memory_write)
+    graph.add_node("verify", nodes.verify)
+    graph.add_node("memory_after_verify", nodes.memory_write)
     graph.add_node("memory_after_observe", nodes.memory_write)
     graph.add_node("memory_after_reflect", nodes.memory_write)
     graph.add_node("act", nodes.act)
@@ -98,8 +107,13 @@ def _build_langgraph(nodes: Nodes, checkpoint_path: Optional[Path] = None):
     graph.add_edge("act", "memory_after_act")
     graph.add_edge("memory_after_act", "execute_action")
     graph.add_edge("execute_action", "memory_after_execute")
-    graph.add_edge("memory_after_execute", "observe")
-    graph.add_edge("observe", "memory_after_observe")
+    graph.add_conditional_edges(
+        "memory_after_execute",
+        lambda state: "verify" if is_code_editing_task(state.task) else "observe",
+        {"verify": "verify", "observe": "observe"},
+    )
+    graph.add_edge("verify", "memory_after_verify")
+    graph.add_edge("memory_after_verify", "observe")
     graph.add_edge("memory_after_observe", "reflect")
     graph.add_edge("reflect", "memory_after_reflect")
     graph.add_conditional_edges(

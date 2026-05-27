@@ -6,7 +6,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from rlm_harness.graph.planning import (
+    advance_to_next_step,
+    format_plan_context,
+    parse_structured_plan,
+)
+from rlm_harness.graph.recovery import (
+    ErrorClassifier,
+    ErrorCategory,
+    RecoverySelector,
+    RecoveryStrategy,
+    is_retryable_decision,
+)
 from rlm_harness.graph.task_policy import (
+    estimate_task_complexity,
     is_code_editing_task,
     is_informational_task,
     is_project_audit_task,
@@ -17,6 +30,7 @@ from rlm_harness.graph.task_policy import (
     looks_like_project_summary,
     looks_like_source_dump,
 )
+from rlm_harness.graph.verification import VerificationGate, VerificationResult
 from rlm_harness.memory import Memory
 from rlm_harness.memory.paging import MemoryPager, MemoryPagingConfig
 from rlm_harness.model_client import LMClient
@@ -30,7 +44,7 @@ from rlm_harness.sandbox.tools import (
     render_project_overview_summary,
 )
 from rlm_harness.tracing import TraceStore
-from rlm_harness.types import HarnessState, Msg
+from rlm_harness.types import HarnessState, Msg, PlanStepStatus, TaskPlan
 
 
 class ActionParseError(ValueError):
@@ -49,19 +63,8 @@ class GraphRuntimeConfig:
     memory_paging: MemoryPagingConfig = MemoryPagingConfig()
 
 
-def parse_numbered_plan(text: str) -> list[str]:
-    plan = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if "." in line:
-            head, tail = line.split(".", 1)
-            if head.strip().isdigit() and tail.strip():
-                plan.append(tail.strip())
-                continue
-        plan.append(line.lstrip("-* ").strip())
-    return plan or [text.strip()]
+def parse_numbered_plan(text: str) -> TaskPlan:
+    return parse_structured_plan(text)
 
 
 def parse_python_action(text: str) -> str:
@@ -157,20 +160,59 @@ class Nodes:
 
     @maybe_traceable("Harness.plan", run_type="chain")
     def plan(self, state: HarnessState) -> HarnessState:
+        if self.memory is not None:
+            from rlm_harness.graph.checkpoint import CheckpointManager
+
+            checkpoint_mgr = CheckpointManager(self.runtime.memory)
+            checkpoint = checkpoint_mgr.load_latest(state.thread_id)
+            if checkpoint:
+                state = CheckpointManager.resume_state(state, checkpoint)
+                state.history.append(
+                    {
+                        "node": "plan",
+                        "content": (
+                            f"Resumed from checkpoint at step {checkpoint.step_id}. "
+                            f"{len(checkpoint.completed_step_ids)} steps already completed."
+                        ),
+                    }
+                )
+                self.traces.event(
+                    state.run_id,
+                    "plan_resumed",
+                    {"checkpoint_step_id": checkpoint.step_id},
+                    node="plan",
+                )
+                return state
+
         memory_context = self._memory_context(state)
+        complexity = estimate_task_complexity(state.task)
         messages = [
             Msg(role="system", content="You are the planning node for a coding-agent harness."),
             Msg(
                 role="user",
                 content=(
                     "Return a concise numbered plan for this task. "
+                    "Use sub-numbering for multi-part steps (e.g., 1, 2a, 2b, 3). "
+                    f"The task appears to be {complexity} complexity. "
                     f"Do not use tools yet.\n\nTask: {state.task}"
                     f"{memory_context}"
                 ),
             ),
         ]
-        completion = self.client.complete(messages, max_tokens=300, temperature=0.1)
+        completion = self.client.complete(messages, max_tokens=600, temperature=0.1)
         state.plan = parse_numbered_plan(completion.content)
+        if self.runtime.max_iterations < 6:
+            from rlm_harness.graph.task_policy import default_max_iterations_for_complexity
+
+            state.budget.iteration_limit = self.runtime.max_iterations
+        else:
+            from rlm_harness.graph.task_policy import default_max_iterations_for_complexity
+
+            state.budget.iteration_limit = max(
+                self.runtime.max_iterations,
+                default_max_iterations_for_complexity(complexity),
+            )
+
         state.history.append({"node": "plan", "content": completion.content})
         self.traces.event(
             state.run_id,
@@ -180,7 +222,8 @@ class Nodes:
                 "provider": completion.provider,
                 "latency_ms": completion.latency_ms,
                 "content": completion.content,
-                "plan": state.plan,
+                "plan": state.plan.model_dump(),
+                "complexity": complexity,
             },
             node="plan",
         )
@@ -193,6 +236,7 @@ class Nodes:
                 return self._run_rlm_action(state)
             return self._select_sandbox_action(state)
 
+        plan_text = format_plan_context(state.plan)
         messages = [
             Msg(
                 role="system",
@@ -203,7 +247,10 @@ class Nodes:
             ),
             Msg(
                 role="user",
-                content=f"Task: {state.task}\nPlan: {state.plan}{self._memory_context(state)}",
+                content=(
+                    f"Task: {state.task}\nPlan progress:\n{plan_text}"
+                    f"{self._memory_context(state)}{self._recovery_context(state)}"
+                ),
             ),
         ]
         completion = self.client.complete(messages, max_tokens=700, temperature=0.2)
@@ -372,6 +419,29 @@ class Nodes:
                 "\n\nYour previous response could not be parsed: "
                 f"{parse_error}. Return only valid JSON now."
             )
+        plan_text = format_plan_context(state.plan)
+        current_step = None
+        if state.plan.current_step_id:
+            for s in state.plan.steps:
+                if s.id == state.plan.current_step_id:
+                    current_step = s
+                    break
+        step_guidance = ""
+        if current_step:
+            step_guidance = (
+                f"\nCurrent step (step {current_step.id}): {current_step.description}. "
+                f"Focus on this step only."
+            )
+            if current_step.attempts > 0:
+                step_guidance += (
+                    f"\nPrevious attempt failed. This is attempt "
+                    f"{current_step.attempts + 1}/{current_step.max_attempts}."
+                )
+        progress = (
+            f"\nProgress: {state.plan.completed_count()}/{state.plan.total_count()} "
+            f"steps completed."
+        )
+        budget_status = state.budget.progress_summary
         return [
             Msg(
                 role="system",
@@ -415,9 +485,11 @@ class Nodes:
                 role="user",
                 content=(
                     "Return only valid JSON for this action.\n"
-                    f"Task: {state.task}\nPlan: {state.plan}"
+                    f"Task: {state.task}\nPlan progress:\n{plan_text}"
+                    f"{step_guidance}{progress}\nBudget: {budget_status}"
                     f"{self._recent_history_context(state)}"
-                    f"{self._memory_context(state)}{retry}"
+                    f"{self._memory_context(state)}"
+                    f"{self._recovery_context(state)}{retry}"
                 ),
             ),
         ]
@@ -438,132 +510,44 @@ class Nodes:
     def reflect(self, state: HarnessState) -> HarnessState:
         attempt = int(state.scratch.get("graph_iterations", 0)) + 1
         state.scratch["graph_iterations"] = attempt
+        state.budget.iterations_used = attempt
         last_observation = state.history[-1]["content"] if state.history else ""
         observation_payload = parse_observation_payload(last_observation)
-        if (
-            observation_payload
-            and observation_payload.get("status") == "ok"
-            and is_project_summary_task(state.task)
-        ):
-            user_output = observation_user_output(observation_payload)
-            if (
-                user_output
-                and (
-                    looks_like_file_inventory(user_output)
-                    or looks_like_source_dump(user_output)
-                    or not looks_like_project_summary(user_output)
-                )
-            ):
-                state.status = self._continue_or_stop(
-                    state,
-                    last_observation,
-                    "project-summary task did not produce a project summary",
-                    include_last_answer=False,
-                )
-                self.traces.event(
-                    state.run_id,
-                    "reflection",
-                    {
-                        "decision": state.status,
-                        "content": (
-                            "project-summary task did not produce a project summary"
-                        ),
-                    },
-                    node="reflect",
-                )
-                return state
 
-        if (
-            observation_payload
-            and observation_payload.get("status") == "ok"
-            and is_project_audit_task(state.task)
-        ):
-            user_output = observation_user_output(observation_payload)
-            if user_output and (
-                looks_like_file_inventory(user_output)
-                or looks_like_source_dump(user_output)
-                or not looks_like_project_audit(user_output)
-            ):
-                state.status = self._continue_or_stop(
-                    state,
-                    last_observation,
-                    "project-audit task did not produce evidence-backed findings",
-                    include_last_answer=False,
-                )
-                self.traces.event(
-                    state.run_id,
-                    "reflection",
-                    {
-                        "decision": state.status,
-                        "content": (
-                            "project-audit task did not produce evidence-backed findings"
-                        ),
-                    },
-                    node="reflect",
-                )
-                return state
+        current_step = _find_current_step(state)
+        if current_step and current_step.id != state.plan.current_step_id:
+            for step in state.plan.steps:
+                if step.status == PlanStepStatus.IN_PROGRESS:
+                    step.status = PlanStepStatus.PENDING
+            current_step.status = PlanStepStatus.IN_PROGRESS
+            state.plan.current_step_id = current_step.id
 
-        if (
-            observation_payload
-            and observation_payload.get("status") == "ok"
-            and not observation_user_output(observation_payload)
-            and (is_informational_task(state.task) or is_code_editing_task(state.task))
-        ):
-            state.status = self._continue_or_stop(
-                state,
-                last_observation,
-                "informational task produced no user-facing output",
+        if observation_payload:
+            recovery_reason = self._check_output_quality(
+                state, observation_payload, last_observation
             )
-            self.traces.event(
-                state.run_id,
-                "reflection",
-                {
-                    "decision": state.status,
-                    "content": "informational task produced no user-facing output",
-                },
-                node="reflect",
-            )
-            return state
-
-        if (
-            observation_payload
-            and observation_payload.get("status") == "ok"
-            and is_code_editing_task(state.task)
-        ):
-            user_output = observation_user_output(observation_payload)
-            if user_output and not looks_like_code_edit_result(user_output):
-                state.status = self._continue_or_stop(
-                    state,
-                    last_observation,
-                    "code-editing task did not report changed files or verification",
-                    include_last_answer=False,
-                )
-                self.traces.event(
-                    state.run_id,
-                    "reflection",
-                    {
-                        "decision": state.status,
-                        "content": (
-                            "code-editing task did not report changed files or verification"
-                        ),
-                    },
-                    node="reflect",
-                )
+            if recovery_reason:
+                category = ErrorClassifier.classify_for_recovery_failure(recovery_reason)
+                self._apply_recovery(state, category, current_step, recovery_reason)
                 return state
 
         observation_status = parse_observation_status(last_observation)
-        if is_retryable_observation(observation_status):
-            message = f"sandbox observation status was {observation_status}"
-            state.status = self._continue_or_stop(state, last_observation, message)
-            self.traces.event(
-                state.run_id,
-                "reflection",
-                {"decision": state.status, "content": message},
-                node="reflect",
-            )
-            return state
-
         if observation_status and observation_status != "ok":
+            category = ErrorClassifier.classify(
+                observation_status,
+                observation_user_output(observation_payload or {}),
+                (observation_payload.get("stderr", "") if observation_payload else ""),
+                bool(observation_payload and observation_payload.get("timed_out", False)),
+            )
+            if category != ErrorCategory.UNKNOWN or observation_status == "error":
+                self._apply_recovery(
+                    state,
+                    category,
+                    current_step,
+                    f"sandbox observation status was {observation_status}",
+                )
+                return state
+
             state.status = "error"
             state.final_answer = final_answer_from_action(last_observation, task=state.task)
             self.traces.event(
@@ -577,6 +561,13 @@ class Nodes:
             )
             return state
 
+        if observation_payload and observation_payload.get("status") == "ok":
+            verification_passed = self._check_verification_result(state)
+            if current_step and verification_passed:
+                advance_to_next_step(state.plan)
+                if not state.plan.has_more():
+                    return self.done(state)
+
         messages = [
             Msg(
                 role="system",
@@ -586,21 +577,270 @@ class Nodes:
                 role="user",
                 content=(
                     "Decide whether the task is complete. Reply with only done or continue.\n\n"
-                    f"Task: {state.task}\nLast observation: {last_observation}"
+                    f"Task: {state.task}\n"
+                    f"Plan progress:\n{format_plan_context(state.plan)}\n"
+                    f"Budget: {state.budget.progress_summary}\n"
+                    f"Last observation: {last_observation}"
                     f"{self._memory_context(state)}"
                 ),
             ),
         ]
         completion = self.client.complete(messages, max_tokens=20, temperature=0)
         decision = "done" if "done" in completion.content.lower() else "continue"
+        if decision == "done":
+            return self.done(state)
         if decision == "continue" and attempt >= self.runtime.max_iterations:
-            decision = "stopped"
+            state.status = "stopped"
             state.final_answer = final_answer_from_action(last_observation, task=state.task)
+            self.traces.event(
+                state.run_id,
+                "reflection",
+                {"decision": "stopped", "content": "max iterations reached"},
+                node="reflect",
+            )
+            return state
+        if decision == "continue" and state.budget.is_exhausted:
+            return self.finalize_partial(state)
+
         state.status = decision
         self.traces.event(
             state.run_id,
             "reflection",
             {"decision": decision, "content": completion.content},
+            node="reflect",
+        )
+        return state
+
+    def _check_output_quality(
+        self,
+        state: HarnessState,
+        observation_payload: dict,
+        last_observation: str,
+    ) -> str:
+        if observation_payload.get("status") != "ok":
+            return ""
+
+        if is_project_summary_task(state.task):
+            user_output = observation_user_output(observation_payload)
+            if user_output and (
+                looks_like_file_inventory(user_output)
+                or looks_like_source_dump(user_output)
+                or not looks_like_project_summary(user_output)
+            ):
+                return "project-summary task did not produce a project summary"
+
+        if is_project_audit_task(state.task):
+            user_output = observation_user_output(observation_payload)
+            if user_output and (
+                looks_like_file_inventory(user_output)
+                or looks_like_source_dump(user_output)
+                or not looks_like_project_audit(user_output)
+            ):
+                return "project-audit task did not produce evidence-backed findings"
+
+        if not observation_user_output(observation_payload) and (
+            is_informational_task(state.task) or is_code_editing_task(state.task)
+        ):
+            return "informational task produced no user-facing output"
+
+        if is_code_editing_task(state.task):
+            user_output = observation_user_output(observation_payload)
+            if user_output and not looks_like_code_edit_result(user_output):
+                return "code-editing task did not report changed files or verification"
+
+        return ""
+
+    def _check_verification_result(self, state: HarnessState) -> bool:
+        result = state.scratch.get("verification_result")
+        if result is None:
+            return True
+        if isinstance(result, dict):
+            return bool(result.get("passed", True))
+        if isinstance(result, VerificationResult):
+            return result.passed
+        return True
+
+    def _apply_recovery(
+        self,
+        state: HarnessState,
+        category: ErrorCategory,
+        step: Optional["PlanStep"],
+        reason: str,
+    ) -> None:
+        attempt = int(state.scratch.get("graph_iterations", 0))
+        if attempt >= self.runtime.max_iterations:
+            state.status = "stopped"
+            state.final_answer = (
+                f"Stopped after {self.runtime.max_iterations} attempts. "
+                f"Last issue: {reason}"
+            )
+            self.traces.event(
+                state.run_id,
+                "reflection",
+                {"decision": "stopped", "error_category": category.value, "reason": reason},
+                node="reflect",
+            )
+            return
+
+        if step is not None:
+            step.attempts += 1
+            step.status = PlanStepStatus.FAILED
+        else:
+            step = _find_or_create_default_step(state)
+
+        strategy = RecoverySelector.select(category, step)
+        hint = RecoverySelector.generate_hint(strategy, step, reason)
+
+        if category == ErrorCategory.VERIFICATION_FAILURE:
+            state.scratch["recovery_hint"] = hint
+            step.status = PlanStepStatus.IN_PROGRESS
+            state.status = "continue"
+        elif is_retryable_decision(strategy):
+            state.scratch["recovery_hint"] = hint
+            step.status = PlanStepStatus.IN_PROGRESS
+            state.status = "continue"
+        elif strategy == RecoveryStrategy.SKIP:
+            step.status = PlanStepStatus.SKIPPED
+            advance_to_next_step(state.plan)
+            if not state.plan.has_more():
+                state = self.finalize_partial(state)
+                state.scratch["recovery_hint"] = ""
+                state.status = "continue"
+        else:
+            state.status = "error"
+            last_obs = state.history[-1]["content"] if state.history else ""
+            state.final_answer = final_answer_from_action(last_obs, task=state.task)
+
+        self.traces.event(
+            state.run_id,
+            "reflection",
+            {
+                "decision": state.status,
+                "error_category": category.value,
+                "recovery_strategy": strategy.value,
+                "step_id": step.id,
+                "step_attempts": step.attempts,
+                "reason": reason,
+            },
+            node="reflect",
+        )
+
+    @maybe_traceable("Harness.verify", run_type="tool")
+    def verify(self, state: HarnessState) -> HarnessState:
+        if not is_code_editing_task(state.task):
+            state.history.append({"node": "verify", "content": "skipped (not a code editing task)"})
+            return state
+
+        if self.runtime.sandbox_enabled:
+            sandbox_config = self.runtime.sandbox_config or SandboxConfig(
+                workspace=Path(state.workspace)
+            )
+            try:
+                with DockerREPL(
+                    sandbox_config,
+                    completion_client=self.client,
+                    subcall_config=self.runtime.subcall_config,
+                ) as repl:
+                    import rlm_harness.graph.verification as verification
+
+                    def _sandbox_shell(cmd: str, timeout: float):
+                        code = (
+                            "import subprocess as _s, json as _j\n"
+                            f"_r = _s.run({cmd!r}, shell=True, executable='/bin/sh', "
+                            f"text=True, capture_output=True, timeout={timeout}, check=False)\n"
+                            "print(_j.dumps({"
+                            "'returncode': _r.returncode, "
+                            "'stdout': _r.stdout, "
+                            "'stderr': _r.stderr, "
+                            "'timed_out': False}))\n"
+                        )
+                        result = repl.execute(code, timeout_s=timeout + 5)
+                        last_line = result.stdout.strip().split("\n")[-1]
+                        try:
+                            return json.loads(last_line)
+                        except (json.JSONDecodeError, IndexError):
+                            return {
+                                "returncode": 1,
+                                "stdout": result.stdout,
+                                "stderr": result.stderr,
+                                "timed_out": result.timed_out,
+                            }
+
+                    verification.set_run_shell_callback(_sandbox_shell)
+                    try:
+                        gate = VerificationGate(Path(state.workspace))
+                        result = gate.verify()
+                    finally:
+                        verification.set_run_shell_callback(None)
+            except SandboxError as exc:
+                result = VerificationResult(
+                    passed=True,
+                    summary=f"Verification skipped (sandbox error): {exc}",
+                )
+        else:
+            try:
+                gate = VerificationGate(Path(state.workspace))
+                result = gate.verify()
+            except Exception as exc:
+                result = VerificationResult(
+                    passed=True,
+                    summary=f"Verification skipped due to error: {exc}",
+                )
+
+        state.scratch["verification_result"] = {
+            "passed": result.passed,
+            "checks": [
+                {"check_type": c.check_type, "passed": c.passed, "output": c.output}
+                for c in result.checks
+            ],
+            "changed_files": result.changed_files,
+            "summary": result.summary,
+        }
+        state.history.append({"node": "verify", "content": result.summary})
+        self.traces.event(
+            state.run_id,
+            "verification",
+            {
+                "passed": result.passed,
+                "checks": [
+                    {"check_type": c.check_type, "passed": c.passed}
+                    for c in result.checks
+                ],
+                "changed_files": result.changed_files,
+            },
+            node="verify",
+        )
+        return state
+
+    def finalize_partial(self, state: HarnessState) -> HarnessState:
+        completed = [s for s in state.plan.steps if s.status == PlanStepStatus.COMPLETED]
+        pending = [s for s in state.plan.steps if s.status == PlanStepStatus.PENDING]
+        completed_desc = [f"Step {s.id}: {s.description}" for s in completed]
+        pending_desc = [f"Step {s.id}: {s.description}" for s in pending]
+
+        messages = [
+            Msg(
+                role="system",
+                content="Synthesize a partial answer from what was accomplished.",
+            ),
+            Msg(
+                role="user",
+                content=(
+                    f"Task: {state.task}\n"
+                    f"Completed ({len(completed)}): {completed_desc}\n"
+                    f"Not done ({len(pending)}): {pending_desc}\n"
+                    f"Budget: {state.budget.progress_summary}\n"
+                    f"Last output: {state.history[-1]['content'] if state.history else 'none'}"
+                ),
+            ),
+        ]
+        completion = self.client.complete(messages, max_tokens=300, temperature=0.1)
+        state.final_answer = completion.content
+        state.status = "stopped"
+        self.traces.event(
+            state.run_id,
+            "finalize_partial",
+            {"partial_answer": completion.content},
             node="reflect",
         )
         return state
@@ -643,6 +883,13 @@ class Nodes:
         return f"\n\nMemory context:\n{context}"
 
     @staticmethod
+    def _recovery_context(state: HarnessState) -> str:
+        hint = state.scratch.get("recovery_hint", "")
+        if not isinstance(hint, str) or not hint.strip():
+            return ""
+        return f"\n\nRecovery guidance: {hint}"
+
+    @staticmethod
     def _recent_history_context(state: HarnessState) -> str:
         if not state.history:
             return ""
@@ -678,6 +925,28 @@ def parse_observation_status(observation: str) -> Optional[str]:
         return None
     status = payload.get("status")
     return status if isinstance(status, str) else None
+
+
+def _find_current_step(state: HarnessState) -> Optional[PlanStep]:
+    for step in state.plan.steps:
+        if step.id == state.plan.current_step_id:
+            return step
+    for step in state.plan.steps:
+        if step.status in (PlanStepStatus.PENDING, PlanStepStatus.IN_PROGRESS):
+            return step
+    return None
+
+
+def _find_or_create_default_step(state: HarnessState) -> PlanStep:
+    for step in state.plan.steps:
+        if step.status in (PlanStepStatus.PENDING, PlanStepStatus.IN_PROGRESS):
+            return step
+    from rlm_harness.types import PlanStep
+
+    step = PlanStep(id="1", description="complete the task")
+    state.plan.steps.append(step)
+    state.plan.current_step_id = "1"
+    return step
 
 
 def final_answer_from_action(action: str, task: str = "") -> str:
@@ -732,7 +1001,8 @@ def render_tool_list() -> str:
 def rlm_action_context(state: HarnessState, mount_path: str = "/workspace") -> dict:
     return {
         "task": state.task,
-        "plan": state.plan,
+        "plan": state.plan.model_dump(),
+        "plan_context": format_plan_context(state.plan),
         "recent_history": state.history[-4:],
         "memory_context": state.scratch.get("memory_context", ""),
         "workspace": mount_path,

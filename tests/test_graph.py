@@ -145,7 +145,10 @@ class CapturingClient(LMClient):
 
 class GraphTests(unittest.TestCase):
     def test_parse_numbered_plan(self):
-        self.assertEqual(parse_numbered_plan("1. Inspect\n2. Act"), ["Inspect", "Act"])
+        plan = parse_numbered_plan("1. Inspect\n2. Act")
+        self.assertEqual(len(plan.steps), 2)
+        self.assertEqual(plan.steps[0].description, "Inspect")
+        self.assertEqual(plan.steps[1].description, "Act")
 
     def test_parse_python_action(self):
         code = parse_python_action('{"type": "python", "code": "print(2 + 2)"}')
@@ -967,6 +970,133 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(client.action_calls, 2)
         self.assertIn("123", final_state.final_answer)
         self.assertIn("action_parse_error", report)
+
+    def test_checkpoint_save_and_resume_from_memory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir)
+            thread_id = "checkpoint-thread-1"
+            memory = Memory(path / "memory.db")
+            traces = TraceStore(path / "traces.db")
+            state = HarnessState(
+                task="three step task: first summarize, then audit, then list files",
+                workspace=temp_dir,
+                thread_id=thread_id,
+                run_id="checkpoint-run-1",
+            )
+            from rlm_harness.graph.checkpoint import CheckpointManager
+            from rlm_harness.graph.planning import parse_structured_plan, advance_to_next_step
+
+            state.plan = parse_structured_plan(
+                "1. First step\n2. Second step\n3. Third step"
+            )
+            # Simulate completing step 1
+            advance_to_next_step(state.plan)
+
+            mgr = CheckpointManager(memory)
+            cp = mgr.save(state)
+            self.assertEqual(cp.step_id, "2")
+            self.assertIn("1", cp.completed_step_ids)
+
+            # Now simulate a resume
+            loaded = mgr.load_latest(thread_id)
+            self.assertIsNotNone(loaded)
+
+            new_state = HarnessState(
+                task="three step task: first summarize, then audit, then list files",
+                workspace=temp_dir,
+                thread_id=thread_id,
+                run_id="checkpoint-run-2",
+            )
+            new_state.plan = parse_structured_plan(
+                "1. First step\n2. Second step\n3. Third step"
+            )
+            new_state = CheckpointManager.resume_state(new_state, loaded)
+            self.assertTrue(new_state.scratch.get("resumed_from_checkpoint"))
+            self.assertEqual(new_state.plan.current_step_id, "2")
+            self.assertEqual(
+                new_state.plan.steps[0].status, "completed"
+            )
+
+            memory.close()
+
+    def test_plan_resumes_from_checkpoint_when_memory_active(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir)
+            thread_id = "checkpoint-resume-graph"
+            memory = Memory(path / "memory.db")
+            traces = TraceStore(path / "traces.db")
+
+            # Pre-seed a checkpoint
+            from rlm_harness.graph.checkpoint import CheckpointManager
+            from rlm_harness.graph.planning import parse_structured_plan, advance_to_next_step
+
+            temp_state = HarnessState(
+                task="resume me",
+                workspace=temp_dir,
+                thread_id=thread_id,
+                run_id="seed-run",
+            )
+            temp_state.plan = parse_structured_plan(
+                "1. Already done step\n2. Should start here\n3. Future step"
+            )
+            advance_to_next_step(temp_state.plan)
+            mgr = CheckpointManager(memory)
+            mgr.save(temp_state)
+
+            # Now invoke the graph — plan() should detect the checkpoint and resume
+            run_id = traces.start_run("resume me", temp_dir, thread_id)
+            state = HarnessState(
+                task="resume me",
+                workspace=temp_dir,
+                thread_id=thread_id,
+                run_id=run_id,
+            )
+            runtime = GraphRuntimeConfig(
+                memory=memory,
+                memory_paging=MemoryPagingConfig(),
+            )
+            try:
+                graph = build_graph(
+                    Nodes(LMClient(provider="stub"), traces, runtime),
+                    backend="simple",
+                )
+                final_state = graph.invoke(state)
+            finally:
+                close_getattr = getattr(graph, "close", None)
+                if callable(close_getattr):
+                    close_getattr()
+                memory.close()
+
+        self.assertTrue(final_state.scratch.get("resumed_from_checkpoint"))
+        self.assertEqual(final_state.status, "done")
+
+    def test_budget_exhaustion_synthesizes_partial_answer(self):
+        from rlm_harness.graph.planning import parse_structured_plan
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            traces = TraceStore(Path(temp_dir) / "traces.db")
+            run_id = traces.start_run("multi-step task", temp_dir)
+            state = HarnessState(
+                task="multi-step task",
+                workspace=temp_dir,
+                thread_id=run_id,
+                run_id=run_id,
+            )
+            state.plan = parse_structured_plan(
+                "1. Check environment\n2. List files\n3. Run audit"
+            )
+            state.budget.iterations_used = 5
+            state.budget.iteration_limit = 5
+            state.budget.tokens_used = 99000
+            state.budget.token_limit = 100000
+            state.status = "continue"
+
+            nodes = Nodes(LMClient(provider="stub"), traces)
+            final_state = nodes.finalize_partial(state)
+
+            self.assertEqual(final_state.status, "stopped")
+            self.assertTrue(final_state.final_answer)
+            self.assertIn("multi-step", final_state.final_answer)
 
 
 if __name__ == "__main__":

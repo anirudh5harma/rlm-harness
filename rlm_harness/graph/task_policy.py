@@ -247,6 +247,56 @@ def looks_like_project_audit(output: str) -> bool:
     return has_audit_language and has_evidence and not looks_like_file_inventory(output)
 
 
+def estimate_task_complexity(task: str) -> str:
+    """Estimate task complexity as 'simple', 'moderate', or 'complex'."""
+    lowered = task.lower()
+
+    complex_markers = sum(
+        1
+        for term in (
+            "and",
+            "then",
+            "also",
+            "additionally",
+            "finally",
+            "refactor",
+            "migrate",
+            "rewrite",
+            "redesign",
+            "restructure",
+            "multi",
+            "multiple",
+            "entire",
+            "full",
+            "comprehensive",
+            "all",
+            "every",
+            "throughout",
+            "pipeline",
+            "e2e",
+            "end-to-end",
+            "integration",
+            "deploy",
+            "production",
+        )
+        if term in lowered
+    )
+
+    if complex_markers >= 3:
+        return "complex"
+    if complex_markers >= 1:
+        return "moderate"
+    return "simple"
+
+
+def default_max_attempts_for_complexity(complexity: str) -> int:
+    return {"simple": 2, "moderate": 3, "complex": 5}.get(complexity, 3)
+
+
+def default_max_iterations_for_complexity(complexity: str) -> int:
+    return {"simple": 4, "moderate": 6, "complex": 10}.get(complexity, 6)
+
+
 def parse_possible_literal(output: str):
     stripped = output.strip()
     if not stripped:
