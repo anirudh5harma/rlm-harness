@@ -412,8 +412,8 @@ class TraceStoreTests(unittest.TestCase):
             console.marker("command", "harness run task", important=True)
 
         marker = stderr.getvalue()
-        self.assertIn("\033[36m[command]\033[0m", marker)
-        self.assertIn("\033[34mharness run task\033[0m", marker)
+        self.assertIn("\033[96m[command]\033[0m", marker)
+        self.assertIn("\033[94mharness run task\033[0m", marker)
 
     def test_json_payload_uses_final_state_answer_for_error_runs(self):
         with tempfile.TemporaryDirectory() as temp_dir:

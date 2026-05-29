@@ -46,7 +46,9 @@ class ToolRegistryTests(unittest.TestCase):
 
         self.assertIn("Harness tools", catalog)
         self.assertIn("workspace", catalog)
+        self.assertIn("mcp", catalog)
         self.assertIn("project_summary [read]", catalog)
+        self.assertIn("mcp_call_tool [medium]", catalog)
         self.assertIn("apply_pending_change [high] (confirmation)", catalog)
 
     def test_graph_prompt_tool_list_uses_registry(self):
@@ -76,6 +78,17 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertIsInstance(
             parse_action({"kind": "apply_pending_change", "change_id": "change_1"}),
             ApplyPendingChangeAction,
+        )
+        self.assertEqual(
+            parse_action(
+                {
+                    "kind": "mcp_call_tool",
+                    "server": "github",
+                    "tool_name": "get_issue",
+                    "arguments": {"id": 1},
+                }
+            ).kind,
+            "mcp_call_tool",
         )
 
 

@@ -15,6 +15,7 @@ class ToolScope(str, Enum):
     PROJECT = "project"
     CONTROL = "control"
     MEMORY = "memory"
+    MCP = "mcp"
     RUNTIME = "runtime"
 
 
@@ -25,6 +26,7 @@ class SideEffect(str, Enum):
     COMMAND = "command"
     GIT_READ = "git_read"
     MEMORY_WRITE = "memory_write"
+    MCP_TOOL = "mcp_tool"
     COMPLETION = "completion"
 
 
@@ -122,6 +124,7 @@ def render_tool_catalog(
         ToolScope.SHELL,
         ToolScope.CONTROL,
         ToolScope.MEMORY,
+        ToolScope.MCP,
         ToolScope.RUNTIME,
     ]
     for scope in scopes:
@@ -347,6 +350,32 @@ DEFAULT_TOOL_DESCRIPTORS = [
         side_effect=SideEffect.MEMORY_WRITE,
         sandbox_required=False,
         parameters={"content": "memory text", "scope": "user or project"},
+    ),
+    ToolDescriptor(
+        name="mcp_list_tools",
+        action_kind="mcp_list_tools",
+        summary="List tools from a configured MCP server or designated purpose.",
+        scope=ToolScope.MCP,
+        risk=ActionRisk.READ,
+        side_effect=SideEffect.NONE,
+        sandbox_required=False,
+        parameters={"server": "optional MCP server name", "purpose": "optional purpose label"},
+    ),
+    ToolDescriptor(
+        name="mcp_call_tool",
+        action_kind="mcp_call_tool",
+        summary="Call a tool exposed by a configured MCP server.",
+        scope=ToolScope.MCP,
+        risk=ActionRisk.MEDIUM,
+        side_effect=SideEffect.MCP_TOOL,
+        sandbox_required=False,
+        timeout_s=30.0,
+        parameters={
+            "server": "optional MCP server name",
+            "purpose": "optional purpose label",
+            "tool_name": "remote MCP tool name",
+            "arguments": "tool arguments object",
+        },
     ),
     ToolDescriptor(
         name="python_repl",

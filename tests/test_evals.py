@@ -15,7 +15,7 @@ from rlm_harness.evals.runner import (
 from rlm_harness.evals.suite import EvalSuiteFileLoader, read_suite_text
 from rlm_harness.memory import Memory
 from rlm_harness.memory.evolution import EvolutionProposalStore
-from rlm_harness.memory.profile import TasteProfileStore
+from rlm_harness.memory.profile import TasteProfileManager, TasteProfileStore
 
 
 class EvalSystemTests(unittest.TestCase):
@@ -130,6 +130,69 @@ class EvalSystemTests(unittest.TestCase):
         self.assertEqual(len(proposals), 1)
         self.assertIn("compact summaries", taste_records[0].text)
 
+    def test_eval_runner_routes_project_taste_and_explicit_harness_args(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            suite = EvalSuite(
+                name="cli",
+                cases=[
+                    EvalCase(
+                        id="taste-context",
+                        prompt="show taste context",
+                        workspace=root / "case",
+                        harness_args=[
+                            "taste",
+                            "--profile-db",
+                            "{profile_db}",
+                            "--memory-db",
+                            "{memory_db}",
+                            "context",
+                        ],
+                        grader=UnitTestGrader("python -c 'print(\"ok\")'"),
+                        taste_records=[
+                            {
+                                "scope": "user",
+                                "kind": "preference",
+                                "text": "Prefer direct answers.",
+                            },
+                            {
+                                "scope": "project",
+                                "kind": "verification_command",
+                                "text": "Run `pytest` for verification.",
+                            },
+                        ],
+                        output_contains=["User taste", "Project conventions", "pytest"],
+                    )
+                ],
+            )
+            runner = EvalRunner(
+                harness_command=[
+                    "python",
+                    "-c",
+                    (
+                        "import sys; "
+                        "from rlm_harness.cli import main; "
+                        "raise SystemExit(main())"
+                    ),
+                    "run",
+                    "--provider",
+                    "stub",
+                    "--model",
+                    "stub",
+                ],
+            )
+            report = runner.run(suite)
+
+            profile_db = root / "case" / ".rlm_harness" / "profile.db"
+            memory_db = root / "case" / ".rlm_harness" / "memory.db"
+            with Memory(profile_db) as profile_memory, Memory(memory_db) as project_memory:
+                context = TasteProfileManager(profile_memory, project_memory).render_context()
+
+        self.assertTrue(report.results[0].passed, report.results[0].output)
+        self.assertIn("User taste", report.results[0].harness_stdout)
+        self.assertIn("Project conventions", report.results[0].harness_stdout)
+        self.assertIn("Run `pytest` for verification.", context)
+
     def test_eval_suite_file_loader_loads_taste_regression_fields_from_json(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             suite_path = Path(temp_dir) / "suite.json"
@@ -139,6 +202,7 @@ class EvalSystemTests(unittest.TestCase):
                     '"test_command":"python -c \\"print(1)\\"",'
                     '"taste_records":[{"scope":"user","kind":"preference",'
                     '"text":"Prefer direct answers."}],'
+                    '"harness_args":["taste","context"],'
                     '"evolution_proposals":[{"scope":"user","kind":"prompt_rule",'
                     '"title":"Direct","body":"Prefer direct answers.",'
                     '"rationale":"Seeded by eval.","status":"approved"}],'
@@ -151,6 +215,7 @@ class EvalSystemTests(unittest.TestCase):
 
         case = suite.cases[0]
         self.assertEqual(case.taste_records[0]["text"], "Prefer direct answers.")
+        self.assertEqual(case.harness_args, ["taste", "context"])
         self.assertEqual(case.evolution_proposals[0]["title"], "Direct")
         self.assertEqual(case.output_contains, ["direct"])
         self.assertEqual(case.output_not_contains, ["verbose"])
@@ -161,6 +226,7 @@ class EvalSystemTests(unittest.TestCase):
         self.assertEqual(suite.name, "daily-driver")
         self.assertGreaterEqual(len(suite.cases), 3)
         self.assertIn("fix-python-unittest", {case.id for case in suite.cases})
+        self.assertIn("slash-palette-cli", {case.id for case in suite.cases})
         self.assertIn('"name": "daily-driver"', read_suite_text("daily-driver"))
 
     def test_output_expectations_are_case_insensitive(self):

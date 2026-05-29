@@ -44,7 +44,9 @@ from rlm_harness.kernel import (
 )
 from rlm_harness.memory import Memory, MemoryPagingConfig
 from rlm_harness.memory.evolution import EvolutionProposalStore
+from rlm_harness.memory.profile import TasteProfileStore
 from rlm_harness.model_client import LMClient
+from rlm_harness.project_style import scan_project_style
 from rlm_harness.rlm.runtime import find_repl_blocks
 from rlm_harness.sandbox import DockerREPL, SandboxConfig
 from rlm_harness.sandbox import tools as sandbox_tools
@@ -288,6 +290,15 @@ class GraphTests(unittest.TestCase):
         self.assertIsInstance(action, CompleteTaskAction)
         self.assertEqual(action.summary, "Done")
 
+    def test_parse_typed_tool_action_accepts_mcp_actions(self):
+        action = parse_typed_tool_action(
+            '{"kind":"mcp_call_tool","server":"github","tool_name":"get_issue","arguments":{"id":"1"}}'
+        )
+
+        self.assertEqual(action.kind, "mcp_call_tool")
+        self.assertEqual(action.server, "github")
+        self.assertEqual(action.arguments, {"id": "1"})
+
     def test_parse_typed_tool_action_rejects_host_only_action(self):
         with self.assertRaisesRegex(Exception, "not executable"):
             parse_typed_tool_action('{"kind":"record_memory","content":"remember this"}')
@@ -296,7 +307,9 @@ class GraphTests(unittest.TestCase):
         names = {tool["name"] for tool in executable_tool_payload(AutonomyMode.ASK)}
 
         self.assertIn("project_summary", names)
+        self.assertIn("mcp_list_tools", names)
         self.assertIn("complete_task", names)
+        self.assertNotIn("mcp_call_tool", names)
         self.assertNotIn("write_file", names)
         self.assertNotIn("run_shell", names)
         self.assertNotIn("propose_file_change", names)
@@ -1105,6 +1118,124 @@ class GraphTests(unittest.TestCase):
         self.assertIn("taste_learned", report)
         self.assertIn("evolution_proposed", report)
 
+    def test_scanned_project_style_is_injected_into_future_plan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir)
+            (path / "pyproject.toml").write_text(
+                "[project]\n"
+                "dependencies = ['pydantic>=2']\n"
+                "[project.optional-dependencies]\n"
+                "dev = ['pytest>=8']\n"
+                "[tool.ruff]\n"
+                "line-length = 100\n",
+                encoding="utf-8",
+            )
+            profile_memory = Memory(path / "profile.db")
+            project_memory = Memory(path / "memory.db")
+            traces = TraceStore(path / "traces.db")
+            try:
+                store = TasteProfileStore(project_memory)
+                for record in scan_project_style(path):
+                    store.add(record)
+                client = CapturingClient()
+                run_id = traces.start_run("summarize this project", temp_dir, "style-thread")
+                state = HarnessState(
+                    task="summarize this project",
+                    workspace=temp_dir,
+                    thread_id="style-thread",
+                    run_id=run_id,
+                )
+                runtime = GraphRuntimeConfig(
+                    profile_memory=profile_memory,
+                    memory=project_memory,
+                )
+                graph = build_graph(Nodes(client, traces, runtime), backend="simple")
+                final = graph.invoke(state)
+            finally:
+                profile_memory.close()
+                project_memory.close()
+
+        self.assertEqual(final.status, "done")
+        self.assertIn("Taste context", client.plan_prompt)
+        self.assertIn("Project conventions", client.plan_prompt)
+        self.assertIn("Keep Python line length at 100 characters", client.plan_prompt)
+
+    def test_project_style_is_auto_scanned_before_planning(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir)
+            (path / "pyproject.toml").write_text(
+                "[project]\n"
+                "[project.optional-dependencies]\n"
+                "dev = ['pytest>=8']\n"
+                "[tool.ruff]\n"
+                "line-length = 100\n",
+                encoding="utf-8",
+            )
+            profile_memory = Memory(path / "profile.db")
+            project_memory = Memory(path / "memory.db")
+            traces = TraceStore(path / "traces.db")
+            try:
+                client = CapturingClient()
+                run_id = traces.start_run("summarize this project", temp_dir, "style-thread")
+                state = HarnessState(
+                    task="summarize this project",
+                    workspace=temp_dir,
+                    thread_id="style-thread",
+                    run_id=run_id,
+                )
+                runtime = GraphRuntimeConfig(
+                    profile_memory=profile_memory,
+                    memory=project_memory,
+                    auto_style_scan=True,
+                )
+                graph = build_graph(Nodes(client, traces, runtime), backend="simple")
+                final = graph.invoke(state)
+                records = TasteProfileStore(project_memory).records(scope="project")
+                report = traces.render_report(run_id)
+            finally:
+                profile_memory.close()
+                project_memory.close()
+
+        self.assertEqual(final.status, "done")
+        self.assertIn("Keep Python line length at 100 characters", client.plan_prompt)
+        self.assertTrue(any(record.kind == "style" for record in records))
+        self.assertIn("project_style_scanned", report)
+
+    def test_project_style_auto_scan_can_be_disabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir)
+            (path / "pyproject.toml").write_text(
+                "[tool.ruff]\nline-length = 100\n",
+                encoding="utf-8",
+            )
+            profile_memory = Memory(path / "profile.db")
+            project_memory = Memory(path / "memory.db")
+            traces = TraceStore(path / "traces.db")
+            try:
+                client = CapturingClient()
+                run_id = traces.start_run("summarize this project", temp_dir, "style-thread")
+                state = HarnessState(
+                    task="summarize this project",
+                    workspace=temp_dir,
+                    thread_id="style-thread",
+                    run_id=run_id,
+                )
+                runtime = GraphRuntimeConfig(
+                    profile_memory=profile_memory,
+                    memory=project_memory,
+                    auto_style_scan=False,
+                )
+                graph = build_graph(Nodes(client, traces, runtime), backend="simple")
+                final = graph.invoke(state)
+                records = TasteProfileStore(project_memory).records(scope="project")
+            finally:
+                profile_memory.close()
+                project_memory.close()
+
+        self.assertEqual(final.status, "done")
+        self.assertEqual(records, [])
+        self.assertNotIn("Keep Python line length at 100 characters", client.plan_prompt)
+
     def test_completion_marker_becomes_clean_user_output(self):
         answer = final_answer_from_action(
             render_observation(
@@ -1369,7 +1500,7 @@ class GraphTests(unittest.TestCase):
             )
             client = TypedProjectSummaryClient()
             runtime = GraphRuntimeConfig(
-                sandbox_enabled=True,
+                sandbox_enabled=False,
                 act_engine="tool",
                 max_iterations=3,
             )
@@ -1383,6 +1514,45 @@ class GraphTests(unittest.TestCase):
         self.assertTrue(any(isinstance(event, ActionSelectedEvent) for event in typed_events))
         self.assertTrue(any(isinstance(event, ObservationRecordedEvent) for event in typed_events))
         self.assertTrue(any(isinstance(event, CompletionEvent) for event in typed_events))
+
+    def test_tool_action_engine_edits_files_when_docker_is_disabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "mathlib.py").write_text(
+                "def add(a, b):\n    return a - b\n",
+                encoding="utf-8",
+            )
+            (workspace / "test_mathlib.py").write_text(
+                "import unittest\n\n"
+                "from mathlib import add\n\n\n"
+                "class MathTests(unittest.TestCase):\n"
+                "    def test_adds_numbers(self):\n"
+                "        self.assertEqual(add(2, 3), 5)\n\n\n"
+                "if __name__ == '__main__':\n"
+                "    unittest.main()\n",
+                encoding="utf-8",
+            )
+            traces = TraceStore(workspace / "traces.db")
+            task = "Fix the failing test in mathlib.py and report what changed."
+            run_id = traces.start_run(task, str(workspace))
+            state = HarnessState(
+                task=task,
+                workspace=str(workspace),
+                thread_id=run_id,
+                run_id=run_id,
+            )
+            runtime = GraphRuntimeConfig(
+                sandbox_enabled=False,
+                act_engine="tool",
+                max_iterations=6,
+            )
+            graph = build_graph(Nodes(LMClient(provider="stub"), traces, runtime), backend="simple")
+            final_state = graph.invoke(state)
+            content = (workspace / "mathlib.py").read_text(encoding="utf-8")
+
+        self.assertEqual(final_state.status, "done")
+        self.assertIn("return a + b", content)
+        self.assertIn("Changed files", final_state.final_answer)
 
     def test_tool_action_engine_retries_non_executable_action(self):
         with tempfile.TemporaryDirectory() as temp_dir:

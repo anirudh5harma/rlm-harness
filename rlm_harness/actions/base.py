@@ -219,6 +219,24 @@ class RecordMemoryAction(BaseAction):
     risk: ActionRisk = ActionRisk.LOW
 
 
+class MCPListToolsAction(BaseAction):
+    kind: Literal["mcp_list_tools"] = "mcp_list_tools"
+    server: Optional[str] = None
+    purpose: Optional[str] = None
+    timeout_s: float = 30.0
+    risk: ActionRisk = ActionRisk.READ
+
+
+class MCPCallToolAction(BaseAction):
+    kind: Literal["mcp_call_tool"] = "mcp_call_tool"
+    server: Optional[str] = None
+    purpose: Optional[str] = None
+    tool_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    timeout_s: float = 30.0
+    risk: ActionRisk = ActionRisk.MEDIUM
+
+
 class CompleteTaskAction(BaseAction):
     kind: Literal["complete_task"] = "complete_task"
     summary: str
@@ -251,6 +269,8 @@ AnyAction = Annotated[
         ApplyPendingChangeAction,
         ClearPendingChangesAction,
         RecordMemoryAction,
+        MCPListToolsAction,
+        MCPCallToolAction,
         CompleteTaskAction,
     ],
     Field(discriminator="kind"),
