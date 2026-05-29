@@ -563,6 +563,42 @@ class GraphTests(unittest.TestCase):
 
         self.assertEqual(action.kind, "project_overview")
 
+    def test_entrypoint_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("Where is the CLI entrypoint?")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_entrypoint_answer(self):
+        overview = {
+            "files": ["Cargo.toml", "crates/cli/src/main.rs", "README.md"],
+            "documents": [
+                {
+                    "path": "Cargo.toml",
+                    "content": (
+                        "[workspace]\n"
+                        "members = [\"crates/cli\"]\n\n"
+                        "[[bin]]\n"
+                        "name = \"sample\"\n"
+                        "path = \"crates/cli/src/main.rs\"\n"
+                    ),
+                }
+            ],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="Where is the CLI entrypoint?",
+        )
+
+        self.assertIn("Entrypoints", answer)
+        self.assertIn("`crates/cli/src/main.rs`", answer)
+        self.assertIn("Cargo.toml is present.", answer)
+        self.assertIn("Open the top candidate", answer)
+        self.assertNotIn("Search Results for `the`", answer)
+        self.assertNotIn("Project Summary", answer)
+
     def test_project_overview_renders_verification_commands_for_test_question(self):
         overview = {
             "files": ["Cargo.toml", "crates/cli/src/main.rs"],
@@ -576,6 +612,814 @@ class GraphTests(unittest.TestCase):
         self.assertIn("Verification Commands", answer)
         self.assertIn("`cargo test`", answer)
         self.assertIn("Cargo.toml is present.", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_run_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("How do I run this project?")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_run_commands_for_run_question(self):
+        overview = {
+            "files": ["package.json", "pnpm-lock.yaml", "src/main.ts"],
+            "documents": [
+                {
+                    "path": "package.json",
+                    "content": '{"scripts":{"dev":"vite dev","build":"vite build"}}',
+                }
+            ],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="How do I run this project?",
+        )
+
+        self.assertIn("Run Commands", answer)
+        self.assertIn("`pnpm dev`", answer)
+        self.assertIn("package.json defines script(s): build, dev.", answer)
+        self.assertIn("Run the first command", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_stack_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("What stack does this project use?")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_dependency_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("List package dependencies.")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_dependency_answer(self):
+        overview = {
+            "files": ["package.json", "pnpm-lock.yaml"],
+            "documents": [
+                {
+                    "path": "package.json",
+                    "content": (
+                        '{"dependencies":{"react":"^19.0.0","vite":"^7.0.0"},'
+                        '"devDependencies":{"typescript":"^5.0.0","vitest":"^3.0.0"}}'
+                    ),
+                }
+            ],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="List package dependencies.",
+        )
+
+        self.assertIn("Dependencies", answer)
+        self.assertIn("runtime:", answer)
+        self.assertIn("`react`", answer)
+        self.assertIn("`vite`", answer)
+        self.assertIn("development:", answer)
+        self.assertIn("`typescript`", answer)
+        self.assertIn("pnpm appears to be the package manager.", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_project_overview_renders_stack_answer(self):
+        overview = {
+            "files": ["package.json", "src/App.tsx"],
+            "documents": [
+                {
+                    "path": "package.json",
+                    "content": (
+                        '{"dependencies":{"react":"^19.0.0","vite":"^7.0.0",'
+                        '"@tanstack/react-router":"^1.0.0"},'
+                        '"devDependencies":{"typescript":"^5.0.0"}}'
+                    ),
+                }
+            ],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="What stack does this project use?",
+        )
+
+        self.assertIn("Tech Stack", answer)
+        self.assertIn("- Node.js", answer)
+        self.assertIn("- TypeScript", answer)
+        self.assertIn("- React", answer)
+        self.assertIn("- Vite", answer)
+        self.assertIn("Dependency Signals", answer)
+        self.assertIn("package.json is present.", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_test_location_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("Where are the tests?")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_test_location_answer(self):
+        overview = {
+            "files": ["pyproject.toml", "app.py", "tests/test_app.py"],
+            "documents": [{"path": "pyproject.toml", "content": "[project]\nname='sample'\n"}],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="Where are the tests?",
+        )
+
+        self.assertIn("Test Files", answer)
+        self.assertIn("`tests/test_app.py`", answer)
+        self.assertIn("Likely Commands", answer)
+        self.assertIn("`pytest`", answer)
+        self.assertIn("A top-level tests/ directory is present.", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_project_structure_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("How is this project structured?")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_project_structure_answer(self):
+        overview = {
+            "files": [
+                "README.md",
+                "Cargo.toml",
+                "crates/cli/src/main.rs",
+                "tests/test_smoke.py",
+                "docs/architecture.md",
+            ],
+            "documents": [{"path": "Cargo.toml", "content": "[workspace]\n"}],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="How is this project structured?",
+        )
+
+        self.assertIn("Project Structure", answer)
+        self.assertIn("`crates` - Rust workspace crates", answer)
+        self.assertIn("`tests` - test coverage", answer)
+        self.assertIn("Start With", answer)
+        self.assertIn("`Cargo.toml`", answer)
+        self.assertIn("crates/ contains Rust workspace members.", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_todo_question_selects_marker_search_action(self):
+        action = deterministic_typed_action_for_task("Find TODOs and FIXME comments.")
+
+        self.assertEqual(action.kind, "search_code")
+        self.assertEqual(action.pattern, r"\b(TODO|FIXME|HACK|XXX)\b")
+
+    def test_todo_search_observation_renders_task_markers(self):
+        answer = final_answer_from_action(
+            render_observation(
+                {
+                    "status": "ok",
+                    "stdout": (
+                        "src/app.py:2:    pass  # TODO: wire real implementation\n"
+                        "src/client.ts:1:// FIXME: handle auth refresh\n"
+                    ),
+                    "stderr": "",
+                    "observation_kind": "text",
+                }
+            ),
+            task="What TODOs are in this project?",
+        )
+
+        self.assertIn("Task Markers", answer)
+        self.assertIn("src/app.py:2 - pass  # TODO: wire real implementation", answer)
+        self.assertIn("src/client.ts:1 - // FIXME: handle auth refresh", answer)
+        self.assertIn("verify whether it is still current", answer)
+        self.assertNotIn("Search Results for `TODOs`", answer)
+        self.assertNotIn('"stdout"', answer)
+
+    def test_setup_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task(
+            "How do I install dependencies for this project?"
+        )
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_setup_answer(self):
+        overview = {
+            "files": ["package.json", "pnpm-lock.yaml", "src/main.ts"],
+            "documents": [
+                {
+                    "path": "package.json",
+                    "content": '{"scripts":{"dev":"vite dev","test":"vitest"}}',
+                }
+            ],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="How do I install dependencies for this project?",
+        )
+
+        self.assertIn("Setup Commands", answer)
+        self.assertIn("`pnpm install`", answer)
+        self.assertIn("After Setup", answer)
+        self.assertIn("`pnpm dev`", answer)
+        self.assertIn("pnpm-lock.yaml indicates pnpm.", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_project_commands_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("What scripts can I run in this project?")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_project_commands_answer(self):
+        overview = {
+            "files": ["package.json", "pnpm-lock.yaml", "src/main.ts"],
+            "documents": [
+                {
+                    "path": "package.json",
+                    "content": (
+                        '{"scripts":{"dev":"vite dev","build":"vite build",'
+                        '"lint":"eslint .","test":"vitest"}}'
+                    ),
+                }
+            ],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="What scripts can I run in this project?",
+        )
+
+        self.assertIn("Project Commands", answer)
+        self.assertIn("`pnpm dev` - vite dev", answer)
+        self.assertIn("`pnpm build` - vite build", answer)
+        self.assertIn("`pnpm test` - vitest", answer)
+        self.assertIn("package.json defines script(s): build, dev, lint, test.", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_environment_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("What environment variables do I need?")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_environment_answer_without_real_env_values(self):
+        overview = {
+            "files": ["package.json", ".env.example", ".env"],
+            "documents": [
+                {
+                    "path": ".env.example",
+                    "content": (
+                        "OPENAI_API_KEY=\n"
+                        "DATABASE_URL=postgres://example\n"
+                        "LOG_LEVEL=info\n"
+                    ),
+                }
+            ],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="What environment variables do I need?",
+        )
+
+        self.assertIn("Environment Variables", answer)
+        self.assertIn("`OPENAI_API_KEY` from `.env.example` - required", answer)
+        self.assertIn("`DATABASE_URL` from `.env.example`", answer)
+        self.assertIn("Real `.env` files are present", answer)
+        self.assertNotIn("secret-real-value", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_container_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("How do I run this in Docker?")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_container_answer(self):
+        overview = {
+            "files": [
+                "package.json",
+                "Dockerfile",
+                "docker-compose.yml",
+                ".dockerignore",
+            ],
+            "documents": [
+                {"path": "package.json", "content": '{"name":"webapp"}'},
+                {
+                    "path": "Dockerfile",
+                    "content": "FROM node:22\nEXPOSE 3000\nCMD [\"pnpm\", \"start\"]\n",
+                },
+                {"path": "docker-compose.yml", "content": "services:\n  web:\n    build: .\n"},
+            ],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="How do I run this in Docker?",
+        )
+
+        self.assertIn("Container Runtime", answer)
+        self.assertIn("`Dockerfile` - Docker image definition", answer)
+        self.assertIn("`docker-compose.yml` - Docker Compose runtime config", answer)
+        self.assertIn("`docker compose up --build`", answer)
+        self.assertIn("`docker build -t webapp .`", answer)
+        self.assertIn("`docker run --rm -p 3000:3000 webapp`", answer)
+        self.assertIn("Dockerfile exposes port(s): 3000.", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_deployment_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("How do I deploy this project?")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_deployment_answer(self):
+        overview = {
+            "files": ["package.json", "pnpm-lock.yaml", "vercel.json"],
+            "documents": [
+                {
+                    "path": "package.json",
+                    "content": (
+                        '{"scripts":{"build":"vite build",'
+                        '"deploy":"vercel deploy --prod"}}'
+                    ),
+                },
+                {"path": "vercel.json", "content": '{"buildCommand":"pnpm build"}'},
+            ],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="How do I deploy this project?",
+        )
+
+        self.assertIn("Deployment", answer)
+        self.assertIn("Vercel (`vercel.json`)", answer)
+        self.assertIn("`vercel.json` - Vercel deployment config", answer)
+        self.assertIn("`pnpm deploy` - vercel deploy --prod", answer)
+        self.assertIn("`pnpm build` - vite build", answer)
+        self.assertIn("vercel.json was read for command hints.", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_database_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("What database does this use?")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_database_answer(self):
+        overview = {
+            "files": [
+                "package.json",
+                "prisma/schema.prisma",
+                "prisma/migrations/001_init/migration.sql",
+                ".env.example",
+            ],
+            "documents": [
+                {
+                    "path": "package.json",
+                    "content": (
+                        '{"scripts":{"db:migrate":"prisma migrate dev"},'
+                        '"dependencies":{"@prisma/client":"^6.0.0","prisma":"^6.0.0"}}'
+                    ),
+                },
+                {
+                    "path": "prisma/schema.prisma",
+                    "content": (
+                        "datasource db { provider = \"postgresql\" "
+                        "url = env(\"DATABASE_URL\") }\n"
+                    ),
+                },
+                {"path": ".env.example", "content": "DATABASE_URL=postgres://example\n"},
+            ],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="What database does this use?",
+        )
+
+        self.assertIn("Database / Schema", answer)
+        self.assertIn("Prisma ORM", answer)
+        self.assertIn("Prisma schema/migrations", answer)
+        self.assertIn("`prisma/schema.prisma` - Prisma schema", answer)
+        self.assertIn("`prisma/migrations/001_init/migration.sql` - Prisma migration", answer)
+        self.assertIn("`npm run db:migrate` - prisma migrate dev", answer)
+        self.assertIn("`DATABASE_URL` appears in `.env.example`.", answer)
+        self.assertNotIn("postgres://example", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_auth_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("Where is authentication handled?")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_auth_answer(self):
+        overview = {
+            "files": [
+                "package.json",
+                "auth.ts",
+                "app/api/auth/[...nextauth]/route.ts",
+                "middleware.ts",
+                "app/login/page.tsx",
+                ".env.example",
+            ],
+            "documents": [
+                {
+                    "path": "package.json",
+                    "content": (
+                        '{"scripts":{"dev":"next dev"},'
+                        '"dependencies":{"next-auth":"^5.0.0","jose":"^6.0.0"}}'
+                    ),
+                },
+                {"path": "auth.ts", "content": "export const { auth } = NextAuth({})\n"},
+                {
+                    "path": ".env.example",
+                    "content": "AUTH_SECRET=\nGITHUB_CLIENT_ID=\nGITHUB_CLIENT_SECRET=\n",
+                },
+            ],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="Where is authentication handled?",
+        )
+
+        self.assertIn("Auth / Sessions", answer)
+        self.assertIn("NextAuth/Auth.js", answer)
+        self.assertIn("JOSE/JWT", answer)
+        self.assertIn("`auth.ts` - auth config/module", answer)
+        self.assertIn("`app/api/auth/[...nextauth]/route.ts` - NextAuth/Auth.js route", answer)
+        self.assertIn("`middleware.ts` - request/auth middleware", answer)
+        self.assertIn("`AUTH_SECRET` appears in `.env.example`.", answer)
+        self.assertIn("`npm run dev`", answer)
+        self.assertNotIn("GITHUB_CLIENT_SECRET=", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_frontend_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("Where is the frontend code?")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_frontend_answer(self):
+        overview = {
+            "files": [
+                "package.json",
+                "app/page.tsx",
+                "app/layout.tsx",
+                "components/ui/button.tsx",
+                "src/components/Header.tsx",
+                "app/globals.css",
+                "tailwind.config.ts",
+                "components.json",
+            ],
+            "documents": [
+                {
+                    "path": "package.json",
+                    "content": (
+                        '{"scripts":{"dev":"next dev"},'
+                        '"dependencies":{"next":"^16.0.0","react":"^19.0.0",'
+                        '"tailwindcss":"^4.0.0","lucide-react":"^0.500.0"}}'
+                    ),
+                },
+                {"path": "components.json", "content": '{"style":"new-york"}'},
+            ],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="Where is the frontend code?",
+        )
+
+        self.assertIn("UI / Frontend", answer)
+        self.assertIn("Next.js", answer)
+        self.assertIn("React", answer)
+        self.assertIn("Tailwind CSS", answer)
+        self.assertIn("shadcn/ui", answer)
+        self.assertIn("`app/page.tsx` - root app page", answer)
+        self.assertIn("`app/layout.tsx` - app layout shell", answer)
+        self.assertIn("`components/ui/button.tsx` - UI component", answer)
+        self.assertIn("`app/globals.css` - global styles", answer)
+        self.assertIn("`npm run dev`", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_edit_target_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task(
+            "What file should I edit to change the homepage UI?"
+        )
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_edit_target_answer(self):
+        overview = {
+            "files": [
+                "package.json",
+                "pnpm-lock.yaml",
+                "app/page.tsx",
+                "app/layout.tsx",
+                "components/ui/button.tsx",
+                "app/globals.css",
+                "tests/homepage.test.tsx",
+            ],
+            "documents": [
+                {
+                    "path": "package.json",
+                    "content": (
+                        '{"scripts":{"test":"vitest"},'
+                        '"dependencies":{"next":"^16.0.0","react":"^19.0.0"}}'
+                    ),
+                }
+            ],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="What file should I edit to change the homepage UI?",
+        )
+
+        self.assertIn("Edit Targets", answer)
+        self.assertIn("`app/page.tsx` - root app page", answer)
+        self.assertIn("`components/ui/button.tsx` - UI component", answer)
+        self.assertIn("`app/globals.css` - global styles", answer)
+        self.assertIn("Matched request terms: homepage", answer)
+        self.assertIn("Check After Editing", answer)
+        self.assertIn("`pnpm test`", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_debugging_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task(
+            "How should I debug failing tests in this project?"
+        )
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_debugging_question_does_not_intercept_fix_task(self):
+        action = deterministic_typed_action_for_task("Fix the failing test in mathlib.py")
+
+        self.assertNotEqual(getattr(action, "kind", None), "project_overview")
+
+    def test_project_overview_renders_debugging_answer(self):
+        overview = {
+            "files": [
+                "package.json",
+                "pnpm-lock.yaml",
+                "src/App.test.tsx",
+                "vitest.config.ts",
+                "playwright.config.ts",
+                ".github/workflows/ci.yml",
+                "app/error.tsx",
+                "lib/logger.ts",
+                "tsconfig.json",
+            ],
+            "documents": [
+                {
+                    "path": "package.json",
+                    "content": (
+                        '{"scripts":{"test":"vitest","lint":"eslint .",'
+                        '"typecheck":"tsc --noEmit"}}'
+                    ),
+                },
+                {
+                    "path": ".github/workflows/ci.yml",
+                    "content": "steps:\n  - run: pnpm test\n  - run: pnpm lint\n",
+                },
+            ],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="How should I debug failing tests in this project?",
+        )
+
+        self.assertIn("Debugging Path", answer)
+        self.assertIn("Start With", answer)
+        self.assertIn("`pnpm test` - vitest", answer)
+        self.assertIn("`pnpm lint` - eslint .", answer)
+        self.assertIn("`pnpm typecheck` - tsc --noEmit", answer)
+        self.assertIn("`src/App.test.tsx` - test file", answer)
+        self.assertIn("`vitest.config.ts` - test runner config", answer)
+        self.assertIn("`.github/workflows/ci.yml` - CI workflow", answer)
+        self.assertIn("`app/error.tsx` - route error boundary", answer)
+        self.assertIn("`lib/logger.ts` - logging helper", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_api_routes_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("Where are the API routes?")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_api_routes_answer(self):
+        overview = {
+            "files": [
+                "package.json",
+                "app/api/users/route.ts",
+                "pages/api/health.ts",
+                "src/server.ts",
+            ],
+            "documents": [
+                {
+                    "path": "package.json",
+                    "content": (
+                        '{"scripts":{"dev":"next dev"},'
+                        '"dependencies":{"next":"^16.0.0","express":"^5.0.0"}}'
+                    ),
+                }
+            ],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="Where are the API routes?",
+        )
+
+        self.assertIn("API / Routes", answer)
+        self.assertIn("Next.js", answer)
+        self.assertIn("Express", answer)
+        self.assertIn("`app/api/users/route.ts` - Next.js App Router API route", answer)
+        self.assertIn("`pages/api/health.ts` - Next.js Pages API route", answer)
+        self.assertIn("Likely Local Server", answer)
+        self.assertIn("`npm run dev`", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_commit_readiness_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("Am I ready to commit?")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_commit_readiness_answer(self):
+        overview = {
+            "files": ["package.json", "pnpm-lock.yaml", "src/app.ts", "README.md"],
+            "documents": [
+                {
+                    "path": "package.json",
+                    "content": '{"scripts":{"test":"vitest","lint":"eslint ."}}',
+                }
+            ],
+            "git_status": " M src/app.ts\n?? notes.md\n",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="Am I ready to commit?",
+        )
+
+        self.assertIn("Commit Readiness", answer)
+        self.assertIn("Working Tree", answer)
+        self.assertIn("- Modified: src/app.ts", answer)
+        self.assertIn("- Untracked: notes.md", answer)
+        self.assertIn("Recommended Checks", answer)
+        self.assertIn("`pnpm test`", answer)
+        self.assertIn("Not quite ready", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_config_files_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("Where is project config?")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_config_files_answer(self):
+        overview = {
+            "files": [
+                "package.json",
+                "tsconfig.json",
+                "vite.config.ts",
+                "vercel.json",
+                ".env",
+            ],
+            "documents": [{"path": "package.json", "content": '{"scripts":{"dev":"vite dev"}}'}],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="What config files are in this repo?",
+        )
+
+        self.assertIn("Config Files", answer)
+        self.assertIn("`package.json` - Node package/dependency config", answer)
+        self.assertIn("`tsconfig.json` - TypeScript/JavaScript compiler config", answer)
+        self.assertIn("`vite.config.ts` - Vite build/dev-server config", answer)
+        self.assertIn("`vercel.json` - deployment/runtime config", answer)
+        self.assertIn("Real `.env` files are present", answer)
+        self.assertNotIn("secret-real-value", answer)
+        self.assertNotIn("Search Results for `project`", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_ci_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("What CI checks run for this repo?")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_ci_answer(self):
+        overview = {
+            "files": [
+                "package.json",
+                ".github/workflows/ci.yml",
+            ],
+            "documents": [
+                {"path": "package.json", "content": '{"scripts":{"test":"vitest"}}'},
+                {
+                    "path": ".github/workflows/ci.yml",
+                    "content": (
+                        "name: CI\n"
+                        "jobs:\n"
+                        "  test:\n"
+                        "    steps:\n"
+                        "      - run: pnpm test\n"
+                        "      - run: pnpm lint\n"
+                    ),
+                },
+            ],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="What CI checks run for this repo?",
+        )
+
+        self.assertIn("CI Checks", answer)
+        self.assertIn("Workflow Files", answer)
+        self.assertIn("`.github/workflows/ci.yml`", answer)
+        self.assertIn("`pnpm test`", answer)
+        self.assertIn("`pnpm lint`", answer)
+        self.assertIn("workflow file was read", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
+        self.assertNotIn("Project Summary", answer)
+
+    def test_documentation_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("What docs exist in this repo?")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_documentation_answer(self):
+        overview = {
+            "files": [
+                "README.md",
+                "docs/architecture.md",
+                "docs/install.md",
+                "docs/api.md",
+            ],
+            "documents": [{"path": "README.md", "content": "# Project\n"}],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(
+            json.dumps(overview),
+            task="What docs exist in this repo?",
+        )
+
+        self.assertIn("Documentation", answer)
+        self.assertIn("`README.md` - project overview", answer)
+        self.assertIn("`docs/install.md` - setup/getting-started docs", answer)
+        self.assertIn("`docs/architecture.md` - architecture/design notes", answer)
+        self.assertIn("Read First", answer)
+        self.assertIn("A README is present.", answer)
+        self.assertNotIn("Return one typed action JSON object", answer)
         self.assertNotIn("Project Summary", answer)
 
     def test_what_is_this_project_is_project_summary_task(self):

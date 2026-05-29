@@ -131,6 +131,648 @@
       ]
     },
     {
+      "id": "entrypoint-question",
+      "prompt": "Where is the CLI entrypoint?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "Cargo.toml": "[workspace]\nmembers = [\"crates/cli\"]\n\n[[bin]]\nname = \"sample\"\npath = \"crates/cli/src/main.rs\"\n",
+        "crates/cli/src/main.rs": "fn main() {}\n"
+      },
+      "output_contains": [
+        "Entrypoints",
+        "`crates/cli/src/main.rs`",
+        "Cargo.toml is present"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Search Results for `the`",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "run-project-question",
+      "prompt": "How do I run this project?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "package.json": "{\"scripts\":{\"dev\":\"vite dev\",\"build\":\"vite build\"},\"dependencies\":{\"vite\":\"^7.0.0\"}}\n",
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+        "src/main.ts": "console.log(\"hello\")\n"
+      },
+      "output_contains": [
+        "Run Commands",
+        "`pnpm dev`",
+        "package.json defines script(s)"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "stack-question",
+      "prompt": "What stack does this project use?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "package.json": "{\"name\":\"webapp\",\"scripts\":{\"dev\":\"vite dev\"},\"dependencies\":{\"react\":\"^19.0.0\",\"vite\":\"^7.0.0\",\"@tanstack/react-router\":\"^1.0.0\"},\"devDependencies\":{\"typescript\":\"^5.0.0\"}}\n",
+        "src/App.tsx": "export function App() { return null }\n"
+      },
+      "output_contains": [
+        "Tech Stack",
+        "TypeScript",
+        "React",
+        "Vite",
+        "package.json is present"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "dependencies-question",
+      "prompt": "List package dependencies.",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "package.json": "{\"dependencies\":{\"react\":\"^19.0.0\",\"vite\":\"^7.0.0\"},\"devDependencies\":{\"typescript\":\"^5.0.0\",\"vitest\":\"^3.0.0\"}}\n",
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n"
+      },
+      "output_contains": [
+        "Dependencies",
+        "runtime:",
+        "`react`",
+        "`vite`",
+        "development:",
+        "`typescript`",
+        "pnpm appears to be the package manager"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "test-location-question",
+      "prompt": "Where are the tests?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "pyproject.toml": "[project]\nname = \"sample\"\n",
+        "app.py": "def add(a, b):\n    return a + b\n",
+        "tests/test_app.py": "from app import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n"
+      },
+      "output_contains": [
+        "Test Files",
+        "`tests/test_app.py`",
+        "Likely Commands",
+        "`pytest`"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "project-structure-question",
+      "prompt": "How is this project structured?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "README.md": "# Sample\n",
+        "Cargo.toml": "[workspace]\nmembers = [\"crates/cli\"]\n",
+        "crates/cli/src/main.rs": "fn main() {}\n",
+        "tests/test_smoke.py": "def test_smoke():\n    assert True\n",
+        "docs/architecture.md": "# Architecture\n"
+      },
+      "output_contains": [
+        "Project Structure",
+        "`crates` - Rust workspace crates",
+        "`tests` - test coverage",
+        "Start With",
+        "`Cargo.toml`"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "todo-marker-question",
+      "prompt": "What TODOs are in this project?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "src/app.py": "def run():\n    pass  # TODO: wire real implementation\n",
+        "src/client.ts": "// FIXME: handle auth refresh\nexport const x = 1;\n"
+      },
+      "output_contains": [
+        "Task Markers",
+        "src/app.py:2",
+        "TODO: wire real implementation",
+        "src/client.ts:1",
+        "FIXME: handle auth refresh"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Search Results for `TODOs`",
+        "Plan progress",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "setup-install-question",
+      "prompt": "How do I install dependencies for this project?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "package.json": "{\"scripts\":{\"dev\":\"vite dev\",\"test\":\"vitest\"},\"dependencies\":{\"vite\":\"^7.0.0\"}}\n",
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+        "src/main.ts": "console.log(\"hello\")\n"
+      },
+      "output_contains": [
+        "Setup Commands",
+        "`pnpm install`",
+        "After Setup",
+        "`pnpm dev`",
+        "pnpm-lock.yaml indicates pnpm"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "project-commands-question",
+      "prompt": "What scripts can I run in this project?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "package.json": "{\"scripts\":{\"dev\":\"vite dev\",\"build\":\"vite build\",\"lint\":\"eslint .\",\"test\":\"vitest\"},\"dependencies\":{\"vite\":\"^7.0.0\"}}\n",
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+        "src/main.ts": "console.log(\"hello\")\n"
+      },
+      "output_contains": [
+        "Project Commands",
+        "`pnpm dev` - vite dev",
+        "`pnpm build` - vite build",
+        "`pnpm test` - vitest",
+        "package.json defines script(s)"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "environment-question",
+      "prompt": "What environment variables do I need?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        ".env.example": "OPENAI_API_KEY=\nDATABASE_URL=postgres://example\nLOG_LEVEL=info\n",
+        ".env": "OPENAI_API_KEY=secret-real-value\nDATABASE_URL=postgres://secret\n",
+        "package.json": "{\"scripts\":{\"dev\":\"vite dev\"}}\n"
+      },
+      "output_contains": [
+        "Environment Variables",
+        "`OPENAI_API_KEY` from `.env.example`",
+        "`DATABASE_URL` from `.env.example`",
+        "Real `.env` files are present",
+        "safe config template"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "secret-real-value",
+        "postgres://secret",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "container-runtime-question",
+      "prompt": "How do I run this in Docker?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "package.json": "{\"name\":\"webapp\",\"scripts\":{\"start\":\"vite --host 0.0.0.0\"}}\n",
+        "Dockerfile": "FROM node:22\nWORKDIR /app\nCOPY . .\nEXPOSE 3000\nCMD [\"pnpm\", \"start\"]\n",
+        "docker-compose.yml": "services:\n  web:\n    build: .\n    ports:\n      - \"3000:3000\"\n"
+      },
+      "output_contains": [
+        "Container Runtime",
+        "`Dockerfile` - Docker image definition",
+        "`docker-compose.yml` - Docker Compose runtime config",
+        "`docker compose up --build`",
+        "`docker run --rm -p 3000:3000 webapp`"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "deployment-question",
+      "prompt": "How do I deploy this project?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "package.json": "{\"scripts\":{\"build\":\"vite build\",\"deploy\":\"vercel deploy --prod\"},\"dependencies\":{\"vite\":\"^7.0.0\"}}\n",
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+        "vercel.json": "{\"buildCommand\":\"pnpm build\"}\n"
+      },
+      "output_contains": [
+        "Deployment",
+        "Vercel (`vercel.json`)",
+        "`vercel.json` - Vercel deployment config",
+        "`pnpm deploy` - vercel deploy --prod",
+        "`pnpm build` - vite build"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "database-question",
+      "prompt": "What database does this use?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "package.json": "{\"scripts\":{\"db:migrate\":\"prisma migrate dev\"},\"dependencies\":{\"@prisma/client\":\"^6.0.0\",\"prisma\":\"^6.0.0\"}}\n",
+        "prisma/schema.prisma": "datasource db { provider = \"postgresql\" url = env(\"DATABASE_URL\") }\n",
+        "prisma/migrations/001_init/migration.sql": "CREATE TABLE users (id text primary key);\n",
+        ".env.example": "DATABASE_URL=postgres://example\n"
+      },
+      "output_contains": [
+        "Database / Schema",
+        "Prisma ORM",
+        "Prisma schema/migrations",
+        "`prisma/schema.prisma` - Prisma schema",
+        "`prisma/migrations/001_init/migration.sql` - Prisma migration",
+        "`DATABASE_URL` appears in `.env.example`"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "postgres://example",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "auth-session-question",
+      "prompt": "Where is authentication handled?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "package.json": "{\"scripts\":{\"dev\":\"next dev\"},\"dependencies\":{\"next-auth\":\"^5.0.0\",\"jose\":\"^6.0.0\"}}\n",
+        "auth.ts": "export const { auth } = NextAuth({})\n",
+        "app/api/auth/[...nextauth]/route.ts": "export { GET, POST } from '@/auth'\n",
+        "middleware.ts": "export { auth as middleware } from './auth'\n",
+        "app/login/page.tsx": "export default function LoginPage() { return null }\n",
+        ".env.example": "AUTH_SECRET=\nGITHUB_CLIENT_ID=\nGITHUB_CLIENT_SECRET=secret-example\n"
+      },
+      "output_contains": [
+        "Auth / Sessions",
+        "NextAuth/Auth.js",
+        "JOSE/JWT",
+        "`auth.ts` - auth config/module",
+        "`app/api/auth/[...nextauth]/route.ts` - NextAuth/Auth.js route",
+        "`middleware.ts` - request/auth middleware",
+        "`AUTH_SECRET` appears in `.env.example`",
+        "`npm run dev`"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "secret-example",
+        "GITHUB_CLIENT_SECRET=",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "frontend-question",
+      "prompt": "Where is the frontend code?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "package.json": "{\"scripts\":{\"dev\":\"next dev\"},\"dependencies\":{\"next\":\"^16.0.0\",\"react\":\"^19.0.0\",\"tailwindcss\":\"^4.0.0\",\"lucide-react\":\"^0.500.0\"}}\n",
+        "app/page.tsx": "export default function Page() { return null }\n",
+        "app/layout.tsx": "export default function Layout({ children }) { return children }\n",
+        "components/ui/button.tsx": "export function Button() { return null }\n",
+        "src/components/Header.tsx": "export function Header() { return null }\n",
+        "app/globals.css": "@import \"tailwindcss\";\n",
+        "tailwind.config.ts": "export default {}\n",
+        "components.json": "{\"style\":\"new-york\"}\n"
+      },
+      "output_contains": [
+        "UI / Frontend",
+        "Next.js",
+        "React",
+        "Tailwind CSS",
+        "shadcn/ui",
+        "`app/page.tsx` - root app page",
+        "`app/layout.tsx` - app layout shell",
+        "`components/ui/button.tsx` - UI component",
+        "`app/globals.css` - global styles",
+        "`npm run dev`"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "edit-target-question",
+      "prompt": "What file should I edit to change the homepage UI?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "package.json": "{\"scripts\":{\"test\":\"vitest\"},\"dependencies\":{\"next\":\"^16.0.0\",\"react\":\"^19.0.0\"}}\n",
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+        "app/page.tsx": "export default function Page() { return null }\n",
+        "app/layout.tsx": "export default function Layout({ children }) { return children }\n",
+        "components/ui/button.tsx": "export function Button() { return null }\n",
+        "app/globals.css": "@import \"tailwindcss\";\n",
+        "tests/homepage.test.tsx": "test('homepage', () => {})\n"
+      },
+      "output_contains": [
+        "Edit Targets",
+        "`app/page.tsx` - root app page",
+        "`components/ui/button.tsx` - UI component",
+        "`app/globals.css` - global styles",
+        "Matched request terms: homepage",
+        "Check After Editing",
+        "`pnpm test`"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "debugging-question",
+      "prompt": "How should I debug failing tests in this project?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "package.json": "{\"scripts\":{\"test\":\"vitest\",\"lint\":\"eslint .\",\"typecheck\":\"tsc --noEmit\"},\"dependencies\":{\"vitest\":\"^3.0.0\",\"playwright\":\"^1.0.0\"}}\n",
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+        "src/App.test.tsx": "test('renders', () => {})\n",
+        "vitest.config.ts": "export default {}\n",
+        "playwright.config.ts": "export default {}\n",
+        ".github/workflows/ci.yml": "steps:\n  - run: pnpm test\n  - run: pnpm lint\n",
+        "app/error.tsx": "export default function Error() { return null }\n",
+        "lib/logger.ts": "export const logger = console\n",
+        "tsconfig.json": "{\"compilerOptions\":{}}\n"
+      },
+      "output_contains": [
+        "Debugging Path",
+        "Start With",
+        "`pnpm test` - vitest",
+        "`pnpm lint` - eslint .",
+        "`pnpm typecheck` - tsc --noEmit",
+        "`src/App.test.tsx` - test file",
+        "`vitest.config.ts` - test runner config",
+        "`.github/workflows/ci.yml` - CI workflow",
+        "`app/error.tsx` - route error boundary",
+        "`lib/logger.ts` - logging helper"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "api-routes-question",
+      "prompt": "Where are the API routes?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "package.json": "{\"scripts\":{\"dev\":\"next dev\"},\"dependencies\":{\"next\":\"^16.0.0\",\"express\":\"^5.0.0\"}}\n",
+        "app/api/users/route.ts": "export async function GET() { return Response.json([]) }\n",
+        "pages/api/health.ts": "export default function handler(req, res) { res.status(200).json({ok:true}) }\n",
+        "src/server.ts": "import express from 'express'\n"
+      },
+      "output_contains": [
+        "API / Routes",
+        "Next.js",
+        "Express",
+        "`app/api/users/route.ts` - Next.js App Router API route",
+        "`pages/api/health.ts` - Next.js Pages API route",
+        "Likely Local Server",
+        "`npm run dev`"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "commit-readiness-question",
+      "prompt": "Am I ready to commit?",
+      "setup_commands": [
+        "git init >/dev/null && git config user.email test@example.com && git config user.name Test && git add package.json src/app.ts && git commit -m init >/dev/null && printf 'export const value = 2;\\n' > src/app.ts && printf 'scratch\\n' > notes.md"
+      ],
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "package.json": "{\"scripts\":{\"test\":\"vitest\",\"lint\":\"eslint .\"},\"dependencies\":{\"vite\":\"^7.0.0\"}}\n",
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+        "src/app.ts": "export const value = 1;\n"
+      },
+      "output_contains": [
+        "Commit Readiness",
+        "Working Tree",
+        "Modified: src/app.ts",
+        "Untracked: notes.md",
+        "Recommended Checks",
+        "`pnpm test`",
+        "Not quite ready"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "config-files-question",
+      "prompt": "What config files are in this repo?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "package.json": "{\"scripts\":{\"dev\":\"vite dev\"}}\n",
+        "tsconfig.json": "{\"compilerOptions\":{}}\n",
+        "vite.config.ts": "export default {}\n",
+        "vercel.json": "{\"buildCommand\":\"pnpm build\"}\n",
+        ".env": "OPENAI_API_KEY=secret-real-value\n"
+      },
+      "output_contains": [
+        "Config Files",
+        "`package.json` - Node package/dependency config",
+        "`tsconfig.json` - TypeScript/JavaScript compiler config",
+        "`vite.config.ts` - Vite build/dev-server config",
+        "`vercel.json` - deployment/runtime config"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "secret-real-value",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Search Results for `project`",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "ci-checks-question",
+      "prompt": "What CI checks run for this repo?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        ".github/workflows/ci.yml": "name: CI\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: pnpm test\n      - run: pnpm lint\n",
+        "package.json": "{\"scripts\":{\"test\":\"vitest\",\"lint\":\"eslint .\"}}\n",
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n"
+      },
+      "output_contains": [
+        "CI Checks",
+        "Workflow Files",
+        "`.github/workflows/ci.yml`",
+        "`pnpm test`",
+        "`pnpm lint`"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "documentation-question",
+      "prompt": "What docs exist in this repo?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "README.md": "# Project\n",
+        "docs/architecture.md": "# Architecture\n",
+        "docs/install.md": "# Install\n",
+        "docs/api.md": "# API\n"
+      },
+      "output_contains": [
+        "Documentation",
+        "`README.md` - project overview",
+        "`docs/install.md` - setup/getting-started docs",
+        "`docs/architecture.md` - architecture/design notes",
+        "Read First"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Plan progress",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
       "id": "summary-with-learned-style",
       "prompt": "Summarize this project.",
       "test_command": "python -c \"print('workspace ok')\"",

@@ -30,6 +30,14 @@ from rlm_harness.agents import (
     parse_typed_tool_action,
     render_typed_observation,
 )
+from rlm_harness.graph.grounded_answers import (
+    is_debugging_question,
+    is_edit_target_question,
+    is_grounded_project_overview_question,
+    is_todo_question,
+    render_grounded_project_overview_answer,
+    render_todo_answer,
+)
 from rlm_harness.graph.planning import (
     advance_to_next_step,
     format_plan_context,
@@ -1101,7 +1109,7 @@ class Nodes:
         if observation_payload.get("status") != "ok":
             return ""
 
-        if is_project_audit_task(state.task):
+        if is_project_audit_task(state.task) and not is_debugging_question(state.task):
             user_output = observation_user_output(observation_payload)
             if user_output and (
                 looks_like_file_inventory(user_output)
@@ -1582,7 +1590,7 @@ def build_final_answer(
     verification: object = None,
 ) -> str:
     answer = final_answer_from_action(action, task=task)
-    if not is_code_editing_task(task):
+    if not is_code_editing_task(task) or is_edit_target_question(task):
         return answer
 
     if not looks_like_code_edit_result(answer) or looks_like_source_dump(answer):
@@ -1599,12 +1607,14 @@ def fallback_typed_action_for_task(task: str):
 
 
 def deterministic_typed_action_for_task(task: str):
+    if is_grounded_project_overview_question(task):
+        return ProjectOverviewAction(max_files=300, max_read_bytes=64_000)
     if is_project_summary_task(task):
         return ProjectSummaryAction()
     if is_project_audit_task(task):
         return ProjectAuditAction()
-    if is_verification_question(task):
-        return ProjectOverviewAction(max_files=300, max_read_bytes=64_000)
+    if is_todo_question(task):
+        return SearchCodeAction(pattern=r"\b(TODO|FIXME|HACK|XXX)\b", path=".", max_count=50)
     file_path = file_path_from_task(task)
     if file_path and is_file_explanation_task(task):
         return ReadFileAction(path=file_path)
@@ -1788,6 +1798,8 @@ def final_answer_from_action(action: str, task: str = "") -> str:
                 output,
                 bool(payload.get("truncated")),
             )
+        if payload.get("observation_kind") == "text" and is_todo_question(task):
+            return render_todo_answer(output)
         if payload.get("observation_kind") == "text" and is_code_search_task(task):
             return render_search_answer(output, task)
         if payload.get("summary") == "git status" or (
@@ -1812,8 +1824,9 @@ def normalize_user_output(output: str, task: str = "") -> str:
     if structured is None:
         return output
     if isinstance(structured, dict) and is_project_overview_payload(structured):
-        if is_verification_question(task):
-            return render_verification_answer(structured)
+        grounded_answer = render_grounded_project_overview_answer(structured, task)
+        if grounded_answer is not None:
+            return grounded_answer
         return render_project_overview_summary(structured)
     if isinstance(structured, list) and should_render_bulleted_list(task, structured):
         return "\n".join(f"- {item}" for item in structured)
@@ -1827,102 +1840,6 @@ def should_render_bulleted_list(task: str, values: list) -> bool:
         return False
     lowered = task.lower()
     return "list" in lowered or "files" in lowered
-
-
-def is_verification_question(task: str) -> bool:
-    lowered = task.lower()
-    return any(
-        phrase in lowered
-        for phrase in (
-            "how do i run tests",
-            "how to run tests",
-            "how should i run tests",
-            "what tests should i run",
-            "what test command",
-            "test command",
-            "verification command",
-            "how do i verify",
-            "how should i verify",
-            "how to verify",
-        )
-    )
-
-
-def render_verification_answer(payload: dict) -> str:
-    commands = verification_commands_from_project_overview(payload)
-    files = [path for path in payload.get("files", []) if isinstance(path, str)]
-    sections = ["Verification Commands"]
-    if commands:
-        sections.append("\n".join(f"- `{command}`" for command in commands))
-    else:
-        sections.append("- I do not see a standard test command yet.")
-
-    evidence = verification_evidence(files)
-    if evidence:
-        sections.append("Why:\n" + "\n".join(f"- {line}" for line in evidence))
-    sections.append(
-        "What I would do next:\n"
-        "- Run the narrowest command first, then broaden if it passes."
-    )
-    return "\n".join(sections)
-
-
-def verification_commands_from_project_overview(payload: dict) -> list[str]:
-    files = [path for path in payload.get("files", []) if isinstance(path, str)]
-    documents = [doc for doc in payload.get("documents", []) if isinstance(doc, dict)]
-    scripts = package_scripts_from_documents(documents)
-    commands = []
-    if "test" in scripts:
-        if "pnpm-lock.yaml" in files:
-            commands.append("pnpm test")
-        elif "yarn.lock" in files:
-            commands.append("yarn test")
-        else:
-            commands.append("npm test")
-    if "Cargo.toml" in files or any(path.endswith(".rs") for path in files):
-        commands.append("cargo test")
-    if any(path.startswith("tests/") for path in files):
-        commands.append("pytest")
-    elif any(Path(path).name.startswith("test_") and path.endswith(".py") for path in files):
-        commands.append("python -m unittest")
-    elif "pyproject.toml" in files or any(path.endswith(".py") for path in files):
-        commands.append("python -m pytest")
-    return dedupe_strings(commands)[:3]
-
-
-def package_scripts_from_documents(documents: list[dict]) -> dict:
-    for doc in documents:
-        if doc.get("path") != "package.json" or not isinstance(doc.get("content"), str):
-            continue
-        try:
-            payload = json.loads(str(doc["content"]))
-        except json.JSONDecodeError:
-            return {}
-        scripts = payload.get("scripts")
-        return scripts if isinstance(scripts, dict) else {}
-    return {}
-
-
-def verification_evidence(files: list[str]) -> list[str]:
-    evidence = []
-    for marker in ("Cargo.toml", "pyproject.toml", "package.json"):
-        if marker in files:
-            evidence.append(f"{marker} is present.")
-    if any(path.startswith("tests/") for path in files):
-        evidence.append("A tests/ directory is present.")
-    elif any(Path(path).name.startswith("test_") and path.endswith(".py") for path in files):
-        evidence.append("Python unittest-style test files are present.")
-    return evidence[:4]
-
-
-def dedupe_strings(values: list[str]) -> list[str]:
-    seen = set()
-    result = []
-    for value in values:
-        if value not in seen:
-            seen.add(value)
-            result.append(value)
-    return result
 
 
 FILE_PATH_RE = re.compile(r"(?P<path>[\w./-]+\.[A-Za-z0-9_+-]+)")
@@ -2202,7 +2119,7 @@ def fallback_project_answer_if_needed(
     workspace: Path,
     status: str,
 ) -> str:
-    if is_project_audit_task(task):
+    if is_project_audit_task(task) and not is_debugging_question(task):
         if status != "done" or not looks_like_project_audit(answer):
             return workspace_project_audit(workspace)
         return answer
