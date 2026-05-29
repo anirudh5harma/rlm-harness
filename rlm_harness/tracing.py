@@ -8,6 +8,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Optional
 
+from rlm_harness.kernel.events import AnyRunEvent, parse_event
+
 
 class TraceStore:
     def __init__(self, path: Path):
@@ -85,7 +87,7 @@ class TraceStore:
                 SELECT run_id, thread_id, task, workspace, status, started_at, finished_at
                 FROM runs
                 WHERE thread_id = ?
-                ORDER BY started_at DESC, run_id DESC
+                ORDER BY started_at DESC, rowid DESC
                 LIMIT 1
                 """,
                 (thread_id,),
@@ -104,7 +106,7 @@ class TraceStore:
                 SELECT run_id, thread_id, task, workspace, status, started_at, finished_at
                 FROM runs
                 WHERE thread_id = ?
-                ORDER BY started_at DESC, run_id DESC
+                ORDER BY started_at DESC, rowid DESC
                 LIMIT ?
             """
             params = (thread_id, limit)
@@ -112,7 +114,7 @@ class TraceStore:
             query = """
                 SELECT run_id, thread_id, task, workspace, status, started_at, finished_at
                 FROM runs
-                ORDER BY started_at DESC, run_id DESC
+                ORDER BY started_at DESC, rowid DESC
                 LIMIT ?
             """
             params = (limit,)
@@ -136,6 +138,22 @@ class TraceStore:
                 (run_id, int(time.time()), kind, node, json.dumps(payload, sort_keys=True)),
             )
 
+    def next_sequence(self, run_id: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS count FROM events WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        return int(row["count"]) + 1
+
+    def record_typed_event(self, event: AnyRunEvent) -> None:
+        self.event(
+            event.run_id,
+            event.kind,
+            event.model_dump(mode="json"),
+            node=event.node,
+        )
+
     def iter_events(self, run_id: str) -> Iterable[sqlite3.Row]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -156,6 +174,20 @@ class TraceStore:
             for row in self.iter_events(run_id)
         ]
 
+    def typed_events(self, run_id: str) -> list[AnyRunEvent]:
+        typed = []
+        for event in self.events(run_id):
+            payload = event["payload"]
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("kind") != event["kind"] or "event_id" not in payload:
+                continue
+            try:
+                typed.append(parse_event(payload))
+            except ValueError:
+                continue
+        return typed
+
     def run_summary(self, run_id: str) -> dict[str, Any]:
         run = self.get_run(run_id)
         if run is None:
@@ -163,6 +195,9 @@ class TraceStore:
         events = self.events(run_id)
         final_answer = None
         for event in reversed(events):
+            if event["kind"] == "completion":
+                final_answer = event["payload"].get("final_answer")
+                break
             if event["kind"] == "final":
                 final_answer = event["payload"].get("final_answer")
                 break

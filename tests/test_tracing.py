@@ -10,6 +10,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from rlm_harness import cli
+from rlm_harness.actions import CompleteTaskAction, CompletionStatus, ReadFileAction
+from rlm_harness.kernel import (
+    ActionSelectedEvent,
+    CompletionEvent,
+    RunStartedEvent,
+)
 from rlm_harness.tracing import TraceStore
 from rlm_harness.types import HarnessState
 
@@ -31,6 +37,49 @@ class TraceStoreTests(unittest.TestCase):
             self.assertIn("Trace report", report)
             self.assertIn('"value": 1', report)
 
+    def test_records_and_parses_typed_events(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            traces = TraceStore(Path(temp_dir) / "traces.db")
+            run_id = traces.start_run("task", temp_dir, thread_id="thread-a")
+            traces.record_typed_event(
+                RunStartedEvent(
+                    run_id=run_id,
+                    sequence=traces.next_sequence(run_id),
+                    node="cli",
+                    task="task",
+                    workspace=temp_dir,
+                    thread_id="thread-a",
+                )
+            )
+            traces.record_typed_event(
+                ActionSelectedEvent(
+                    run_id=run_id,
+                    sequence=traces.next_sequence(run_id),
+                    node="act",
+                    action=ReadFileAction(path="README.md"),
+                )
+            )
+            traces.record_typed_event(
+                CompletionEvent.from_action(
+                    run_id=run_id,
+                    sequence=traces.next_sequence(run_id),
+                    node="done",
+                    action=CompleteTaskAction(
+                        summary="done",
+                        status=CompletionStatus.SUCCESS,
+                    ),
+                )
+            )
+
+            typed = traces.typed_events(run_id)
+            summary = traces.run_summary(run_id)
+
+        self.assertIsInstance(typed[0], RunStartedEvent)
+        self.assertIsInstance(typed[1], ActionSelectedEvent)
+        self.assertIsInstance(typed[1].action, ReadFileAction)
+        self.assertIsInstance(typed[2], CompletionEvent)
+        self.assertEqual(summary["final_answer"], "done")
+
     def test_lists_runs_and_summarizes_final_answer(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             traces = TraceStore(Path(temp_dir) / "traces.db")
@@ -49,6 +98,7 @@ class TraceStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             trace_db = str(Path(temp_dir) / "traces.db")
             memory_db = str(Path(temp_dir) / "memory.db")
+            checkpoint_db = str(Path(temp_dir) / "checkpoints.db")
 
             with contextlib.redirect_stdout(io.StringIO()):
                 first = cli.main(
@@ -58,6 +108,8 @@ class TraceStoreTests(unittest.TestCase):
                         "--no-sandbox",
                         "--trace-db",
                         trace_db,
+                        "--checkpoint-db",
+                        checkpoint_db,
                         "--memory-db",
                         memory_db,
                         "--thread-id",
@@ -77,6 +129,8 @@ class TraceStoreTests(unittest.TestCase):
                         "--no-sandbox",
                         "--trace-db",
                         trace_db,
+                        "--checkpoint-db",
+                        checkpoint_db,
                         "--memory-db",
                         memory_db,
                         "--provider",
@@ -92,6 +146,82 @@ class TraceStoreTests(unittest.TestCase):
         self.assertEqual(first, 0)
         self.assertEqual(resumed, 0)
         self.assertEqual(len(runs), 2)
+
+    def test_cli_continue_uses_latest_thread_without_thread_id(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            trace_db = str(Path(temp_dir) / "traces.db")
+            memory_db = str(Path(temp_dir) / "memory.db")
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                first = cli.main(
+                    [
+                        "run",
+                        "remember latest context",
+                        "--no-sandbox",
+                        "--trace-db",
+                        trace_db,
+                        "--memory-db",
+                        memory_db,
+                        "--thread-id",
+                        "thread-latest-cli",
+                        "--provider",
+                        "stub",
+                        "--model",
+                        "stub",
+                        "--quiet",
+                    ]
+                )
+                continued = cli.main(
+                    [
+                        "--continue",
+                        "continue latest context",
+                        "--no-sandbox",
+                        "--trace-db",
+                        trace_db,
+                        "--memory-db",
+                        memory_db,
+                        "--provider",
+                        "stub",
+                        "--model",
+                        "stub",
+                        "--quiet",
+                    ]
+                )
+            traces = TraceStore(Path(trace_db))
+            runs = traces.list_runs(thread_id="thread-latest-cli")
+
+        self.assertEqual(first, 0)
+        self.assertEqual(continued, 0)
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(runs[0]["task"], "continue latest context")
+
+    def test_cli_run_records_typed_run_and_completion_events(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            trace_db = str(Path(temp_dir) / "traces.db")
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = cli.main(
+                    [
+                        "run",
+                        "typed trace task",
+                        "--no-sandbox",
+                        "--no-memory",
+                        "--trace-db",
+                        trace_db,
+                        "--provider",
+                        "stub",
+                        "--model",
+                        "stub",
+                        "--json",
+                    ]
+                )
+            payload = json.loads(stdout.getvalue())
+            traces = TraceStore(Path(trace_db))
+            typed = traces.typed_events(payload["run_id"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIsInstance(typed[0], RunStartedEvent)
+        self.assertTrue(any(isinstance(event, CompletionEvent) for event in typed))
 
     def test_cli_run_json_and_trace_report_json(self):
         with tempfile.TemporaryDirectory() as temp_dir:

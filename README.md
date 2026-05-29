@@ -66,12 +66,22 @@ important values are highlighted in cyan/blue when the terminal supports color.
 
 ```bash
 harness                              # interactive mode
-harness "fix the failing tests"       # run one task
+harness ask "what is this project?"   # read-only workspace answer
+harness plan "how should we fix it?"  # read-only implementation plan
+harness "fix the failing tests"       # run one task with sandboxed typed tools
+harness run "fix tests" --act-engine rlm  # use the legacy recursive engine
+harness work "fix the failing tests"  # explicit typed-tool work command
+harness continue "do the next step"   # continue the latest thread
+harness commands                     # list the clean public command surface
+harness status                       # show provider, latest run, taste, and evolution
+harness tools                        # inspect tool capabilities and risk
 harness /provider openrouter --api-key <key>
 harness /model qwen/qwen3.7-max
 harness /config
 harness readiness                     # check first-run and daily-driver setup
 harness dogfood                       # run readiness, eval, and feedback proof checks
+harness taste                         # show active taste and project conventions
+harness taste learn "Prefer small, reviewable diffs." --active
 harness profile                      # show learned taste and project conventions
 harness profile learn "Prefer small, reviewable diffs." --active
 harness evolve                       # review proposed prompt/policy/eval improvements
@@ -93,9 +103,9 @@ phrases like "I prefer concise final answers" are promoted into the user profile
 successful verification commands are remembered for the current project, and the
 next run receives that taste as context before planning or editing.
 
-Use `harness profile` to inspect active records, `harness profile learn ...` to
-teach it directly, and `harness profile approve/reject <id>` to manage pending
-records.
+Use `harness taste` to inspect active records, `harness taste learn ...` to
+teach it directly, and `harness taste approve/reject <id>` to manage pending
+records. `harness profile` remains available as a compatibility alias.
 
 ## Feedback learning
 

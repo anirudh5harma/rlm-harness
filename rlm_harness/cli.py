@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import shutil
+import sqlite3
 import statistics
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from typing import Optional, TextIO
 
+from rlm_harness.actions import CompleteTaskAction, CompletionStatus
 from rlm_harness.config import (
     CONFIG_PATH,
     default_api_key,
@@ -36,6 +38,7 @@ from rlm_harness.evals.runner import EvalRunner
 from rlm_harness.evals.suite import EvalSuiteFileLoader
 from rlm_harness.graph.build import build_graph
 from rlm_harness.graph.nodes import GraphRuntimeConfig, Nodes
+from rlm_harness.kernel import AutonomyMode, CompletionEvent, RunStartedEvent
 from rlm_harness.memory import Memory, MemoryError, MemoryPagingConfig
 from rlm_harness.memory.evolution import EvolutionProposal, EvolutionProposalManager
 from rlm_harness.memory.feedback import (
@@ -57,12 +60,20 @@ from rlm_harness.providers import (
 )
 from rlm_harness.readiness import build_readiness_report, render_readiness_report
 from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, SandboxError
+from rlm_harness.tools import default_tool_registry, render_tool_catalog
 from rlm_harness.tracing import TraceStore
-from rlm_harness.types import HarnessState, Msg
+from rlm_harness.types import HarnessState, Msg, TaskPlan
 
 PUBLIC_COMMANDS = {
+    "ask",
+    "commands",
+    "continue",
+    "tools",
+    "plan",
     "run",
+    "work",
     "resume",
+    "status",
     "trace",
     "doctor",
     "dogfood",
@@ -72,6 +83,7 @@ PUBLIC_COMMANDS = {
     "provider",
     "profile",
     "readiness",
+    "taste",
     "config",
     "eval",
     "update",
@@ -103,6 +115,135 @@ GRAPH_NODE_MARKERS = {
     "done": ("final", "preparing the response"),
     "learn": ("learn", "saving useful preferences"),
 }
+
+COMMAND_CATALOG = [
+    {
+        "name": "ask",
+        "usage": 'harness ask "what is this project?"',
+        "group": "work",
+        "summary": "Answer read-only questions using typed workspace tools.",
+    },
+    {
+        "name": "plan",
+        "usage": 'harness plan "how should we fix this?"',
+        "group": "work",
+        "summary": "Produce a read-only implementation plan.",
+    },
+    {
+        "name": "run",
+        "usage": 'harness "fix tests"',
+        "group": "work",
+        "summary": "Run a scoped coding task with sandboxed typed tools.",
+    },
+    {
+        "name": "work",
+        "usage": 'harness work "fix tests"',
+        "group": "work",
+        "summary": "Run a coding task with sandboxed typed tools.",
+    },
+    {
+        "name": "resume",
+        "usage": "harness resume <thread-id> [task]",
+        "group": "work",
+        "summary": "Continue a previous thread using the trace database.",
+    },
+    {
+        "name": "continue",
+        "usage": "harness continue [task]",
+        "group": "work",
+        "summary": "Continue the latest thread without copying its id.",
+    },
+    {
+        "name": "trace",
+        "usage": "harness trace list|report|events",
+        "group": "inspect",
+        "summary": "Inspect run history, reports, and event records.",
+    },
+    {
+        "name": "status",
+        "usage": "harness status",
+        "group": "inspect",
+        "summary": "Show provider, latest run, taste, and evolution status.",
+    },
+    {
+        "name": "tools",
+        "usage": "harness tools",
+        "group": "inspect",
+        "summary": "List action capabilities, risks, scopes, and confirmation requirements.",
+    },
+    {
+        "name": "readiness",
+        "usage": "harness readiness",
+        "group": "setup",
+        "summary": "Check whether Harness is ready for daily coding work.",
+    },
+    {
+        "name": "doctor",
+        "usage": "harness doctor",
+        "group": "setup",
+        "summary": "Print local dependency and sandbox health.",
+    },
+    {
+        "name": "provider",
+        "usage": "harness provider [name] [--api-key key]",
+        "group": "setup",
+        "summary": "Choose and save the active model provider.",
+    },
+    {
+        "name": "model",
+        "usage": "harness model [name]",
+        "group": "setup",
+        "summary": "List or save the active model.",
+    },
+    {
+        "name": "config",
+        "usage": "harness config",
+        "group": "setup",
+        "summary": "Show saved provider, model, and profile paths.",
+    },
+    {
+        "name": "taste",
+        "usage": "harness taste list|learn|approve|reject",
+        "group": "learn",
+        "summary": "First-class taste learning and preference management.",
+    },
+    {
+        "name": "profile",
+        "usage": "harness profile list|learn|approve|reject",
+        "group": "learn",
+        "summary": "Compatibility alias for learned taste records.",
+    },
+    {
+        "name": "feedback",
+        "usage": "harness feedback add|list",
+        "group": "learn",
+        "summary": "Record feedback so future runs adapt to your preferences.",
+    },
+    {
+        "name": "evolve",
+        "usage": "harness evolve list|propose|approve|reject",
+        "group": "learn",
+        "summary": "Review self-evolution proposals before they affect behavior.",
+    },
+    {
+        "name": "eval",
+        "usage": "harness eval <suite>",
+        "group": "quality",
+        "summary": "Run local harness evaluation suites.",
+    },
+    {
+        "name": "dogfood",
+        "usage": "harness dogfood",
+        "group": "quality",
+        "summary": "Run readiness, eval, and feedback proof checks.",
+    },
+    {
+        "name": "update",
+        "usage": "harness update",
+        "group": "setup",
+        "summary": "Upgrade the managed install and rebuild the sandbox image.",
+    },
+]
 
 
 def build_client(args: argparse.Namespace) -> LMClient:
@@ -140,6 +281,7 @@ def build_runtime(
         max_action_retries=args.max_action_retries,
         max_iterations=args.max_iterations,
         act_engine=args.act_engine,
+        autonomy=AutonomyMode(args.autonomy),
         memory=memory,
         profile_memory=profile_memory,
         memory_paging=MemoryPagingConfig(
@@ -223,6 +365,7 @@ class RunConsole:
             f"provider={args.provider}",
             f"model={args.model}",
             f"sandbox={'off' if args.no_sandbox else 'on'}",
+            f"mode={args.autonomy}",
         ]
         self.marker("mode", ", ".join(mode), important=True)
 
@@ -264,6 +407,24 @@ def cmd_run(args: argparse.Namespace) -> int:
     return run_task(args, args.task, args.thread_id, Path(args.workspace).resolve())
 
 
+def cmd_ask(args: argparse.Namespace) -> int:
+    args.act_engine = "tool"
+    args.autonomy = AutonomyMode.ASK.value
+    return run_task(args, args.task, args.thread_id, Path(args.workspace).resolve())
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    args.act_engine = "tool"
+    args.autonomy = AutonomyMode.PLAN.value
+    return run_plan_task(args, args.task, args.thread_id, Path(args.workspace).resolve())
+
+
+def cmd_work(args: argparse.Namespace) -> int:
+    args.act_engine = "tool"
+    args.autonomy = AutonomyMode.SANDBOX.value
+    return run_task(args, args.task, args.thread_id, Path(args.workspace).resolve())
+
+
 def cmd_resume(args: argparse.Namespace) -> int:
     traces = TraceStore(Path(args.trace_db))
     previous = traces.latest_run_for_thread(args.thread_id)
@@ -277,6 +438,58 @@ def cmd_resume(args: argparse.Namespace) -> int:
     workspace_value = args.workspace or (previous["workspace"] if previous else ".")
     workspace = Path(workspace_value).resolve()
     return run_task(args, task, args.thread_id, workspace)
+
+
+def cmd_continue(args: argparse.Namespace) -> int:
+    traces = TraceStore(Path(args.trace_db))
+    runs = traces.list_runs(limit=1)
+    if not runs:
+        print(f"Cannot continue: no previous runs in {args.trace_db}", file=sys.stderr)
+        return 1
+    previous = runs[0]
+    thread_id = str(previous["thread_id"])
+    task = args.task or str(previous["task"])
+    workspace_value = args.workspace or previous["workspace"]
+    workspace = Path(str(workspace_value)).resolve()
+    return run_task(args, task, thread_id, workspace)
+
+
+def cmd_commands(args: argparse.Namespace) -> int:
+    commands = command_catalog()
+    if args.json_output:
+        print(json.dumps(commands, sort_keys=True))
+    else:
+        print(render_command_catalog(commands))
+    return 0
+
+
+def command_catalog() -> list[dict[str, str]]:
+    return [dict(command) for command in COMMAND_CATALOG]
+
+
+def render_command_catalog(commands: list[dict[str, str]]) -> str:
+    lines = ["Harness commands", ""]
+    groups = ["work", "inspect", "learn", "quality", "setup"]
+    for group in groups:
+        group_commands = [command for command in commands if command["group"] == group]
+        if not group_commands:
+            continue
+        lines.append(group)
+        for command in group_commands:
+            lines.append(f"  {command['usage']}")
+            lines.append(f"    {command['summary']}")
+        lines.append("")
+    lines.append('Tip: `harness "fix tests"` is shorthand for `harness run "fix tests"`.')
+    return "\n".join(lines).rstrip()
+
+
+def cmd_tools(args: argparse.Namespace) -> int:
+    registry = default_tool_registry()
+    if args.json_output:
+        print(json.dumps(registry.payload(include_internal=args.include_internal), sort_keys=True))
+    else:
+        print(render_tool_catalog(registry, include_internal=args.include_internal))
+    return 0
 
 
 def run_task(
@@ -296,17 +509,7 @@ def run_task(
         run_id=run_id,
         token_budget=args.token_budget,
     )
-    traces.event(
-        run_id,
-        "run_started",
-        {
-            "task": task,
-            "workspace": str(workspace),
-            "sandbox_enabled": not args.no_sandbox,
-            "memory_enabled": not args.no_memory,
-        },
-        node="cli",
-    )
+    record_run_started_event(args, traces, run_id, task, workspace, thread_id)
 
     try:
         with ExitStack() as stack:
@@ -350,6 +553,122 @@ def run_task(
     console.finish(final_state.status, run_id)
     emit_run_output(args, final_state, traces, run_id)
     return 0 if final_state.status == "done" else 1
+
+
+def run_plan_task(
+    args: argparse.Namespace,
+    task: str,
+    thread_id: Optional[str],
+    workspace: Path,
+) -> int:
+    console = RunConsole(args)
+    traces = TraceStore(Path(args.trace_db))
+    run_id = traces.start_run(task, str(workspace), thread_id=thread_id)
+    console.start(args, task, workspace)
+    state = HarnessState(
+        task=task,
+        workspace=str(workspace),
+        thread_id=thread_id or run_id,
+        run_id=run_id,
+        token_budget=args.token_budget,
+    )
+    record_run_started_event(args, traces, run_id, task, workspace, thread_id)
+
+    try:
+        with ExitStack() as stack:
+            console.marker(
+                "setup",
+                "loading memory and profile" if not args.no_memory else "memory disabled",
+            )
+            memory = (
+                None
+                if args.no_memory
+                else stack.enter_context(Memory(Path(args.memory_db)))
+            )
+            profile_memory = (
+                None
+                if args.no_memory
+                else stack.enter_context(Memory(Path(args.profile_db)))
+            )
+            runtime = build_runtime(args, workspace, memory, profile_memory)
+            nodes = Nodes(build_client(args), traces, runtime)
+            console.marker("plan", "building the implementation plan")
+            final_state = nodes.memory_read(state)
+            final_state = nodes.plan(final_state)
+            final_state = nodes.memory_write(final_state)
+            final_state = finalize_plan_only(final_state, traces)
+            final_state = nodes.learn(final_state)
+        traces.finish_run(run_id, final_state.status)
+    except (LMClientError, MemoryError, SandboxError) as exc:
+        console.error(str(exc))
+        traces.event(run_id, "error", {"message": str(exc)}, node="cli")
+        traces.finish_run(run_id, "error")
+        emit_run_output(args, None, traces, run_id, error=str(exc))
+        return 1
+
+    console.finish(final_state.status, run_id)
+    emit_run_output(args, final_state, traces, run_id)
+    return 0 if final_state.status == "done" else 1
+
+
+def record_run_started_event(
+    args: argparse.Namespace,
+    traces: TraceStore,
+    run_id: str,
+    task: str,
+    workspace: Path,
+    thread_id: Optional[str],
+) -> None:
+    traces.record_typed_event(
+        RunStartedEvent(
+            run_id=run_id,
+            sequence=traces.next_sequence(run_id),
+            node="cli",
+            task=task,
+            workspace=str(workspace),
+            thread_id=thread_id or run_id,
+            payload={
+                "sandbox_enabled": not args.no_sandbox,
+                "memory_enabled": not args.no_memory,
+                "autonomy": args.autonomy,
+            },
+        )
+    )
+
+
+def finalize_plan_only(state: HarnessState, traces: TraceStore) -> HarnessState:
+    state.status = "done"
+    state.final_answer = render_user_plan(state.plan)
+    traces.event(
+        state.run_id,
+        "final",
+        {"final_answer": state.final_answer},
+        node="plan",
+    )
+    completion_action = CompleteTaskAction(
+        summary=state.final_answer,
+        status=CompletionStatus.SUCCESS,
+        verification="plan only; no workspace actions executed",
+    )
+    traces.record_typed_event(
+        CompletionEvent.from_action(
+            run_id=state.run_id,
+            sequence=traces.next_sequence(state.run_id),
+            node="plan",
+            action=completion_action,
+        )
+    )
+    return state
+
+
+def render_user_plan(plan: TaskPlan) -> str:
+    if not plan.steps:
+        return "Implementation Plan\nNo plan steps were produced."
+    lines = ["Implementation Plan"]
+    for step in plan.steps:
+        indent = "  " if step.parent_id else ""
+        lines.append(f"{indent}{step.id}. {step.description}")
+    return "\n".join(lines)
 
 
 def emit_run_output(
@@ -599,6 +918,134 @@ def cmd_config(args: argparse.Namespace) -> int:
     else:
         print_current_config()
     return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    payload = status_payload(args)
+    if args.json_output:
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        print_status_payload(payload)
+    return 0
+
+
+def status_payload(args: argparse.Namespace) -> dict[str, object]:
+    provider = default_provider()
+    profile_path = Path(args.profile_db)
+    memory_path = Path(args.memory_db)
+    trace_path = Path(args.trace_db)
+    return {
+        "provider": provider,
+        "model": default_model(),
+        "base_url": default_base_url(),
+        "api_key": "set" if default_api_key(provider) else "missing",
+        "paths": {
+            "config": str(CONFIG_PATH),
+            "trace_db": str(trace_path),
+            "memory_db": str(memory_path),
+            "profile_db": str(profile_path),
+        },
+        "latest_run": latest_run_payload(trace_path),
+        "taste": taste_status_counts(profile_path, memory_path),
+        "evolution": evolution_status_counts(profile_path, memory_path),
+    }
+
+
+def latest_run_payload(trace_path: Path) -> Optional[dict[str, object]]:
+    if not trace_path.exists():
+        return None
+    try:
+        runs = TraceStore(trace_path).list_runs(limit=1)
+    except (OSError, sqlite3.Error, ValueError):
+        return None
+    if not runs:
+        return None
+    run = runs[0]
+    return {
+        "run_id": run["run_id"],
+        "thread_id": run["thread_id"],
+        "status": run["status"],
+        "task": run["task"],
+        "workspace": run["workspace"],
+        "started_at": run["started_at"],
+    }
+
+
+def taste_status_counts(profile_path: Path, memory_path: Path) -> dict[str, int]:
+    counts = {"active": 0, "pending": 0, "rejected": 0}
+    for path in unique_existing_paths(profile_path, memory_path):
+        try:
+            with Memory(path) as memory:
+                for status in counts:
+                    counts[status] += len(TasteProfileStore(memory).records(status=status))
+        except MemoryError:
+            continue
+    return counts
+
+
+def evolution_status_counts(profile_path: Path, memory_path: Path) -> dict[str, int]:
+    counts = {"pending": 0, "approved": 0, "rejected": 0}
+    memories = []
+    with ExitStack() as stack:
+        for path in unique_existing_paths(profile_path, memory_path):
+            try:
+                memories.append(stack.enter_context(Memory(path)))
+            except MemoryError:
+                continue
+        user_memory = memories[0] if memories else None
+        project_memory = memories[1] if len(memories) > 1 else None
+        manager = EvolutionProposalManager(user_memory, project_memory)
+        for status in counts:
+            counts[status] = len(manager.proposals(status=status))
+    return counts
+
+
+def unique_existing_paths(*paths: Path) -> list[Path]:
+    result = []
+    seen = set()
+    for path in paths:
+        resolved = path.expanduser()
+        key = str(resolved)
+        if key in seen or not resolved.exists():
+            continue
+        seen.add(key)
+        result.append(resolved)
+    return result
+
+
+def print_status_payload(payload: dict[str, object]) -> None:
+    print("Harness status")
+    print(f"provider\t{payload['provider']}")
+    print(f"model\t{payload['model']}")
+    print(f"api_key\t{payload['api_key']}")
+    latest = payload.get("latest_run")
+    if isinstance(latest, dict):
+        print(f"latest_thread\t{latest.get('thread_id')}")
+        print(f"latest_status\t{latest.get('status')}")
+        print(f"latest_task\t{latest.get('task')}")
+    else:
+        print("latest_thread\t-")
+    taste = payload.get("taste")
+    if isinstance(taste, dict):
+        print(
+            "taste\t"
+            f"active={taste.get('active', 0)} "
+            f"pending={taste.get('pending', 0)} "
+            f"rejected={taste.get('rejected', 0)}"
+        )
+    evolution = payload.get("evolution")
+    if isinstance(evolution, dict):
+        print(
+            "evolution\t"
+            f"pending={evolution.get('pending', 0)} "
+            f"approved={evolution.get('approved', 0)} "
+            f"rejected={evolution.get('rejected', 0)}"
+        )
+    paths = payload.get("paths")
+    if isinstance(paths, dict):
+        print(f"trace_db\t{paths.get('trace_db')}")
+        print(f"profile_db\t{paths.get('profile_db')}")
+        print(f"memory_db\t{paths.get('memory_db')}")
 
 
 def cmd_readiness(args: argparse.Namespace) -> int:
@@ -1414,6 +1861,50 @@ def cmd_feedback_add(args: argparse.Namespace) -> int:
     return 0
 
 
+def add_taste_command(subparsers, name: str, help_text: str) -> None:
+    command = subparsers.add_parser(name, help=help_text)
+    command.add_argument(
+        "--profile-db",
+        default=str(default_profile_path()),
+        help=argparse.SUPPRESS,
+    )
+    taste_subparsers = command.add_subparsers(dest=f"{name}_command", required=False)
+
+    taste_list = taste_subparsers.add_parser("list")
+    taste_list.add_argument("--scope", choices=["user", "project"], default=None)
+    taste_list.add_argument(
+        "--status",
+        choices=["active", "pending", "rejected"],
+        default="active",
+    )
+    taste_list.add_argument("--kind", default=None)
+    taste_list.add_argument("--json", dest="json_output", action="store_true")
+    taste_list.set_defaults(func=cmd_profile_list)
+
+    taste_learn = taste_subparsers.add_parser("learn")
+    taste_learn.add_argument("text")
+    taste_learn.add_argument("--scope", choices=["user", "project"], default="user")
+    taste_learn.add_argument("--kind", default="preference")
+    taste_learn.add_argument("--confidence", type=float, default=0.9)
+    taste_learn.add_argument("--active", action="store_true")
+    taste_learn.set_defaults(func=cmd_profile_learn)
+
+    taste_approve = taste_subparsers.add_parser("approve")
+    taste_approve.add_argument("record_id")
+    taste_approve.set_defaults(func=cmd_profile_approve)
+
+    taste_reject = taste_subparsers.add_parser("reject")
+    taste_reject.add_argument("record_id")
+    taste_reject.set_defaults(func=cmd_profile_reject)
+    command.set_defaults(
+        func=cmd_profile_list,
+        scope=None,
+        status="active",
+        kind=None,
+        json_output=False,
+    )
+
+
 def cmd_sandbox_build(args: argparse.Namespace) -> int:
     try:
         DockerREPL.build_image(
@@ -1470,8 +1961,8 @@ def parser() -> argparse.ArgumentParser:
     subparsers = root.add_subparsers(
         dest="command",
         metavar=(
-            "{run,resume,trace,doctor,dogfood,evolve,feedback,model,provider,profile,"
-            "readiness,config,eval,update}"
+            "{ask,commands,continue,tools,plan,run,work,resume,trace,doctor,dogfood,evolve,"
+            "feedback,model,provider,profile,taste,status,readiness,config,eval,update}"
         ),
         required=True,
     )
@@ -1629,22 +2120,62 @@ def parser() -> argparse.ArgumentParser:
         )
         command.add_argument(
             "--act-engine",
-            choices=["rlm", "json"],
-            default="rlm",
+            choices=["rlm", "json", "tool"],
+            default="tool",
             help=argparse.SUPPRESS,
         )
+        command.add_argument(
+            "--mode",
+            dest="autonomy",
+            choices=[mode.value for mode in AutonomyMode],
+            default=AutonomyMode.SANDBOX.value,
+            help="Autonomy mode for typed tool execution.",
+        )
         add_model_args(command, public=True)
+
+    commands = subparsers.add_parser("commands", help="List the command surface.")
+    commands.add_argument("--json", dest="json_output", action="store_true")
+    commands.set_defaults(func=cmd_commands)
+
+    tools = subparsers.add_parser("tools", help="List action capabilities.")
+    tools.add_argument("--json", dest="json_output", action="store_true")
+    tools.add_argument(
+        "--include-internal",
+        action="store_true",
+        help="Include runtime compatibility actions.",
+    )
+    tools.set_defaults(func=cmd_tools)
+
+    ask = subparsers.add_parser("ask", help="Ask a read-only workspace question.")
+    ask.add_argument("task")
+    add_run_args(ask)
+    ask.set_defaults(func=cmd_ask)
+
+    plan_cmd = subparsers.add_parser("plan", help="Create a read-only implementation plan.")
+    plan_cmd.add_argument("task")
+    add_run_args(plan_cmd)
+    plan_cmd.set_defaults(func=cmd_plan)
 
     run = subparsers.add_parser("run", help="Run a task.")
     run.add_argument("task")
     add_run_args(run)
     run.set_defaults(func=cmd_run)
 
+    work = subparsers.add_parser("work", help="Run a coding task with typed tools.")
+    work.add_argument("task")
+    add_run_args(work)
+    work.set_defaults(func=cmd_work)
+
     resume = subparsers.add_parser("resume", help="Resume a thread.")
     resume.add_argument("thread_id")
     resume.add_argument("task", nargs="?")
     add_run_args(resume, workspace_default=None, include_thread_id=False)
     resume.set_defaults(func=cmd_resume)
+
+    continue_cmd = subparsers.add_parser("continue", help="Continue the latest thread.")
+    continue_cmd.add_argument("task", nargs="?")
+    add_run_args(continue_cmd, workspace_default=None, include_thread_id=False)
+    continue_cmd.set_defaults(func=cmd_continue)
 
     trace = subparsers.add_parser("trace", help="Inspect traces.")
     trace.add_argument("--trace-db", default=str(default_trace_path()))
@@ -1665,6 +2196,21 @@ def parser() -> argparse.ArgumentParser:
     trace_events.add_argument("run_id")
     trace_events.add_argument("--json", dest="json_output", action="store_true")
     trace_events.set_defaults(func=cmd_trace_events)
+
+    status = subparsers.add_parser("status", help="Show current harness status.")
+    status.add_argument("--json", dest="json_output", action="store_true")
+    status.add_argument("--trace-db", default=str(default_trace_path()))
+    status.add_argument(
+        "--memory-db",
+        default=str(default_memory_path()),
+        help=argparse.SUPPRESS,
+    )
+    status.add_argument(
+        "--profile-db",
+        default=str(default_profile_path()),
+        help=argparse.SUPPRESS,
+    )
+    status.set_defaults(func=cmd_status)
 
     doctor = subparsers.add_parser("doctor", help="Check local setup.")
     doctor.add_argument("--json", dest="json_output", action="store_true")
@@ -1710,47 +2256,8 @@ def parser() -> argparse.ArgumentParser:
     )
     provider.set_defaults(func=cmd_provider)
 
-    profile = subparsers.add_parser("profile", help="Inspect or teach Harness taste.")
-    profile.add_argument(
-        "--profile-db",
-        default=str(default_profile_path()),
-        help=argparse.SUPPRESS,
-    )
-    profile_subparsers = profile.add_subparsers(dest="profile_command", required=False)
-
-    profile_list = profile_subparsers.add_parser("list")
-    profile_list.add_argument("--scope", choices=["user", "project"], default=None)
-    profile_list.add_argument(
-        "--status",
-        choices=["active", "pending", "rejected"],
-        default="active",
-    )
-    profile_list.add_argument("--kind", default=None)
-    profile_list.add_argument("--json", dest="json_output", action="store_true")
-    profile_list.set_defaults(func=cmd_profile_list)
-
-    profile_learn = profile_subparsers.add_parser("learn")
-    profile_learn.add_argument("text")
-    profile_learn.add_argument("--scope", choices=["user", "project"], default="user")
-    profile_learn.add_argument("--kind", default="preference")
-    profile_learn.add_argument("--confidence", type=float, default=0.9)
-    profile_learn.add_argument("--active", action="store_true")
-    profile_learn.set_defaults(func=cmd_profile_learn)
-
-    profile_approve = profile_subparsers.add_parser("approve")
-    profile_approve.add_argument("record_id")
-    profile_approve.set_defaults(func=cmd_profile_approve)
-
-    profile_reject = profile_subparsers.add_parser("reject")
-    profile_reject.add_argument("record_id")
-    profile_reject.set_defaults(func=cmd_profile_reject)
-    profile.set_defaults(
-        func=cmd_profile_list,
-        scope=None,
-        status="active",
-        kind=None,
-        json_output=False,
-    )
+    add_taste_command(subparsers, "profile", "Inspect or teach Harness taste.")
+    add_taste_command(subparsers, "taste", "Manage taste learning and preferences.")
 
     evolve = subparsers.add_parser(
         "evolve",
@@ -2071,11 +2578,8 @@ def interactive_loop() -> int:
             return 0
         if task in {"/h", "/help", "help"}:
             print("Tasks: type any natural-language coding task.")
-            print(
-                "Slash commands: /provider [name] [--api-key key], /model [name], "
-                "/profile, /evolve, /feedback, /readiness, /dogfood, /config, "
-                "/doctor, /update, /quit"
-            )
+            print(render_command_catalog(command_catalog()))
+            print("Slash commands use the same names, for example /provider or /readiness.")
             continue
         if task.startswith("/"):
             try:
@@ -2109,6 +2613,8 @@ def normalize_argv(argv: list[str] | None) -> list[str]:
         argv = sys.argv[1:]
     if not argv:
         return argv
+    if argv[0] in {"-c", "--continue"}:
+        return ["continue", *argv[1:]]
     if argv[0].startswith("/") and len(argv[0]) > 1:
         argv = [argv[0][1:], *argv[1:]]
     if argv[0] in ALL_COMMANDS or argv[0].startswith("-"):
