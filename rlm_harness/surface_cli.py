@@ -9,6 +9,7 @@ from rlm_harness.cli_catalog import (
     render_command_catalog,
     render_slash_palette,
     should_use_color,
+    slash_command_catalog,
 )
 from rlm_harness.tools import default_tool_registry, render_tool_catalog
 
@@ -25,7 +26,7 @@ def cmd_commands(args: argparse.Namespace) -> int:
 def cmd_palette(args: argparse.Namespace) -> int:
     include_internal = not args.public_only
     if args.json_output:
-        payload = {"commands": command_catalog(include_internal=include_internal)}
+        payload = {"commands": slash_command_catalog(include_internal=include_internal)}
         print(json.dumps(payload, sort_keys=True))
     else:
         print(

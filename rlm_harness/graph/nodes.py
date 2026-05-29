@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -10,11 +11,15 @@ from rlm_harness.actions import (
     CommandObservation,
     CompleteTaskAction,
     CompletionStatus,
+    GitStatusAction,
     ObservationStatus,
     ProjectAuditAction,
+    ProjectOverviewAction,
     ProjectSummaryAction,
     PythonReplAction,
+    ReadFileAction,
     RLMTaskAction,
+    SearchCodeAction,
     VerificationStatus,
     parse_action,
 )
@@ -1598,6 +1603,16 @@ def deterministic_typed_action_for_task(task: str):
         return ProjectSummaryAction()
     if is_project_audit_task(task):
         return ProjectAuditAction()
+    if is_verification_question(task):
+        return ProjectOverviewAction(max_files=300, max_read_bytes=64_000)
+    file_path = file_path_from_task(task)
+    if file_path and is_file_explanation_task(task):
+        return ReadFileAction(path=file_path)
+    symbol = search_symbol_from_task(task)
+    if symbol:
+        return SearchCodeAction(pattern=symbol, path=".", max_count=20)
+    if is_git_change_question(task) and not is_code_editing_task(task):
+        return GitStatusAction()
     return None
 
 
@@ -1767,6 +1782,18 @@ def final_answer_from_action(action: str, task: str = "") -> str:
 
     output = observation_user_output(payload)
     if output:
+        if payload.get("observation_kind") == "file" and is_file_explanation_task(task):
+            return render_file_explanation(
+                str(payload.get("path") or file_path_from_task(task) or "file"),
+                output,
+                bool(payload.get("truncated")),
+            )
+        if payload.get("observation_kind") == "text" and is_code_search_task(task):
+            return render_search_answer(output, task)
+        if payload.get("summary") == "git status" or (
+            is_git_change_question(task) and not is_code_editing_task(task)
+        ):
+            return render_git_status_answer(output)
         return normalize_user_output(output, task=task)
 
     status = payload.get("status")
@@ -1785,10 +1812,352 @@ def normalize_user_output(output: str, task: str = "") -> str:
     if structured is None:
         return output
     if isinstance(structured, dict) and is_project_overview_payload(structured):
+        if is_verification_question(task):
+            return render_verification_answer(structured)
         return render_project_overview_summary(structured)
+    if isinstance(structured, list) and should_render_bulleted_list(task, structured):
+        return "\n".join(f"- {item}" for item in structured)
     if is_informational_task(task):
         return json.dumps(structured, indent=2, sort_keys=True)
     return output
+
+
+def should_render_bulleted_list(task: str, values: list) -> bool:
+    if not values or not all(isinstance(item, str) for item in values):
+        return False
+    lowered = task.lower()
+    return "list" in lowered or "files" in lowered
+
+
+def is_verification_question(task: str) -> bool:
+    lowered = task.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "how do i run tests",
+            "how to run tests",
+            "how should i run tests",
+            "what tests should i run",
+            "what test command",
+            "test command",
+            "verification command",
+            "how do i verify",
+            "how should i verify",
+            "how to verify",
+        )
+    )
+
+
+def render_verification_answer(payload: dict) -> str:
+    commands = verification_commands_from_project_overview(payload)
+    files = [path for path in payload.get("files", []) if isinstance(path, str)]
+    sections = ["Verification Commands"]
+    if commands:
+        sections.append("\n".join(f"- `{command}`" for command in commands))
+    else:
+        sections.append("- I do not see a standard test command yet.")
+
+    evidence = verification_evidence(files)
+    if evidence:
+        sections.append("Why:\n" + "\n".join(f"- {line}" for line in evidence))
+    sections.append(
+        "What I would do next:\n"
+        "- Run the narrowest command first, then broaden if it passes."
+    )
+    return "\n".join(sections)
+
+
+def verification_commands_from_project_overview(payload: dict) -> list[str]:
+    files = [path for path in payload.get("files", []) if isinstance(path, str)]
+    documents = [doc for doc in payload.get("documents", []) if isinstance(doc, dict)]
+    scripts = package_scripts_from_documents(documents)
+    commands = []
+    if "test" in scripts:
+        if "pnpm-lock.yaml" in files:
+            commands.append("pnpm test")
+        elif "yarn.lock" in files:
+            commands.append("yarn test")
+        else:
+            commands.append("npm test")
+    if "Cargo.toml" in files or any(path.endswith(".rs") for path in files):
+        commands.append("cargo test")
+    if any(path.startswith("tests/") for path in files):
+        commands.append("pytest")
+    elif any(Path(path).name.startswith("test_") and path.endswith(".py") for path in files):
+        commands.append("python -m unittest")
+    elif "pyproject.toml" in files or any(path.endswith(".py") for path in files):
+        commands.append("python -m pytest")
+    return dedupe_strings(commands)[:3]
+
+
+def package_scripts_from_documents(documents: list[dict]) -> dict:
+    for doc in documents:
+        if doc.get("path") != "package.json" or not isinstance(doc.get("content"), str):
+            continue
+        try:
+            payload = json.loads(str(doc["content"]))
+        except json.JSONDecodeError:
+            return {}
+        scripts = payload.get("scripts")
+        return scripts if isinstance(scripts, dict) else {}
+    return {}
+
+
+def verification_evidence(files: list[str]) -> list[str]:
+    evidence = []
+    for marker in ("Cargo.toml", "pyproject.toml", "package.json"):
+        if marker in files:
+            evidence.append(f"{marker} is present.")
+    if any(path.startswith("tests/") for path in files):
+        evidence.append("A tests/ directory is present.")
+    elif any(Path(path).name.startswith("test_") and path.endswith(".py") for path in files):
+        evidence.append("Python unittest-style test files are present.")
+    return evidence[:4]
+
+
+def dedupe_strings(values: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+FILE_PATH_RE = re.compile(r"(?P<path>[\w./-]+\.[A-Za-z0-9_+-]+)")
+
+
+def file_path_from_task(task: str) -> str:
+    match = FILE_PATH_RE.search(task)
+    if not match:
+        return ""
+    return match.group("path").strip("`'\".,:;()[]{}")
+
+
+def is_file_explanation_task(task: str) -> bool:
+    if not file_path_from_task(task):
+        return False
+    lowered = task.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "explain",
+            "summarize",
+            "summarise",
+            "describe",
+            "what does",
+            "what is in",
+            "what's in",
+        )
+    )
+
+
+def is_code_search_task(task: str) -> bool:
+    return bool(search_symbol_from_task(task))
+
+
+def search_symbol_from_task(task: str) -> str:
+    lowered = task.lower()
+    if not any(
+        phrase in lowered
+        for phrase in (
+            "where is",
+            "where's",
+            "where are",
+            "find",
+            "locate",
+            "defined",
+            "definition",
+            "implemented",
+            "implementation",
+        )
+    ):
+        return ""
+    match = re.search(
+        r"\b(?:where\s+(?:is|are)|find|locate)\s+[`'\"]?([A-Za-z_][\w.]*)",
+        task,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).strip("`'\".")
+    match = re.search(
+        r"\b([A-Za-z_][\w.]*)\s+(?:defined|implemented|definition|implementation)\b",
+        task,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).strip("`'\".")
+    return ""
+
+
+def render_search_answer(output: str, task: str) -> str:
+    symbol = search_symbol_from_task(task)
+    matches = parse_search_matches(output)
+    if not matches:
+        target = f" for `{symbol}`" if symbol else ""
+        return f"Search Results{target}\nNo matching code references found."
+
+    target = f" for `{symbol}`" if symbol else ""
+    lines = [f"Search Results{target}"]
+    for path, line, text in matches[:8]:
+        lines.append(f"- {path}:{line} - {text}")
+    if len(matches) > 8:
+        lines.append(f"- ...and {len(matches) - 8} more matches.")
+    lines.append("What I would do next:\n- Open the most relevant match before editing it.")
+    return "\n".join(lines)
+
+
+def parse_search_matches(output: str) -> list[tuple[str, str, str]]:
+    matches = []
+    for raw_line in output.splitlines():
+        path, line, text = split_rg_line(raw_line)
+        if path and line:
+            matches.append((path, line, text.strip()))
+    return matches
+
+
+def split_rg_line(raw_line: str) -> tuple[str, str, str]:
+    parts = raw_line.split(":", 2)
+    if len(parts) != 3:
+        return "", "", ""
+    path, line, text = parts
+    if not line.isdigit():
+        return "", "", ""
+    return path.removeprefix("./"), line, text
+
+
+def is_git_change_question(task: str) -> bool:
+    lowered = task.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "what changed",
+            "what has changed",
+            "what did i change",
+            "what are my changes",
+            "local changes",
+            "git status",
+            "working tree",
+            "worktree changes",
+            "repo status",
+            "repository status",
+        )
+    )
+
+
+def render_git_status_answer(output: str) -> str:
+    entries = parse_git_status_lines(output)
+    if not entries:
+        return "Git Changes\nNo local changes detected."
+    lines = ["Git Changes"]
+    for label, path in entries[:12]:
+        lines.append(f"- {label}: {path}")
+    if len(entries) > 12:
+        lines.append(f"- ...and {len(entries) - 12} more paths.")
+    lines.append("What I would do next:\n- Review the diff for each changed file before editing.")
+    return "\n".join(lines)
+
+
+def parse_git_status_lines(output: str) -> list[tuple[str, str]]:
+    entries = []
+    for raw_line in output.splitlines():
+        raw = raw_line.rstrip()
+        if not raw:
+            continue
+        if raw.startswith("?? "):
+            code = "??"
+            path = raw[3:].strip()
+        elif len(raw) >= 3 and raw[2] == " ":
+            code = raw[:2]
+            path = raw[3:].strip()
+        else:
+            parts = raw.split(maxsplit=1)
+            if len(parts) != 2:
+                continue
+            code, path = parts[0], parts[1].strip()
+        if not path:
+            continue
+        entries.append((git_status_label(code), path))
+    return entries
+
+
+def git_status_label(code: str) -> str:
+    if code == "??":
+        return "Untracked"
+    if "A" in code:
+        return "Added"
+    if "D" in code:
+        return "Deleted"
+    if "R" in code:
+        return "Renamed"
+    if "C" in code:
+        return "Copied"
+    if "M" in code:
+        return "Modified"
+    return "Changed"
+
+
+def render_file_explanation(path: str, content: str, truncated: bool = False) -> str:
+    lines = [line.rstrip() for line in content.splitlines()]
+    non_empty = [line.strip() for line in lines if line.strip()]
+    functions = python_symbols(lines, "def ")
+    classes = python_symbols(lines, "class ")
+    heading = next(
+        (line.lstrip("# ").strip() for line in non_empty if line.startswith("#")),
+        "",
+    )
+
+    summary = file_summary_sentence(path, heading, functions, classes, non_empty)
+    sections = [f"File Summary: {path}", f"What it does: {summary}"]
+    notable = []
+    if classes:
+        notable.append("Classes: " + ", ".join(f"`{name}`" for name in classes[:6]))
+    if functions:
+        notable.append("Functions: " + ", ".join(f"`{name}`" for name in functions[:8]))
+    if truncated:
+        notable.append("Only the first slice was read; inspect more before editing.")
+    if notable:
+        sections.append("Notable pieces:\n" + "\n".join(f"- {item}" for item in notable))
+    sections.append("What I would do next:\n- Use or add a focused test before changing behavior.")
+    return "\n".join(sections)
+
+
+def python_symbols(lines: list[str], prefix: str) -> list[str]:
+    symbols = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith(prefix):
+            continue
+        name = stripped.removeprefix(prefix).split("(", 1)[0].split(":", 1)[0].strip()
+        if name:
+            symbols.append(name)
+    return symbols
+
+
+def file_summary_sentence(
+    path: str,
+    heading: str,
+    functions: list[str],
+    classes: list[str],
+    non_empty: list[str],
+) -> str:
+    suffix = Path(path).suffix.lower()
+    if heading:
+        return f"Documents {heading}."
+    if suffix == ".py":
+        if functions and classes:
+            return "Defines Python classes and helper functions for this module."
+        if functions:
+            return f"Defines Python function(s) {', '.join(functions[:3])}."
+        if classes:
+            return f"Defines Python class(es) {', '.join(classes[:3])}."
+        return "Contains Python module code."
+    if suffix in {".rs", ".go", ".ts", ".tsx", ".js", ".jsx"}:
+        return f"Contains {suffix.removeprefix('.')} source code."
+    if non_empty:
+        return f"Starts with: {non_empty[0][:120]}"
+    return "The file is empty."
 
 
 def parse_structured_output(output: str):

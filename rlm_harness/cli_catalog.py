@@ -40,6 +40,7 @@ INTERNAL_COMMANDS = {
 }
 ALL_COMMANDS = PUBLIC_COMMANDS | INTERNAL_COMMANDS
 DEFAULT_PROG = "harness"
+SLASH_HIDDEN_COMMANDS = {"tools"}
 
 ANSI_RESET = "\033[0m"
 ANSI_CYAN = "\033[96m"
@@ -273,6 +274,14 @@ def command_catalog(*, include_internal: bool = False) -> list[dict[str, str]]:
     return commands
 
 
+def slash_command_catalog(*, include_internal: bool = False) -> list[dict[str, str]]:
+    return [
+        command
+        for command in command_catalog(include_internal=include_internal)
+        if command["name"] not in SLASH_HIDDEN_COMMANDS
+    ]
+
+
 def render_command_catalog(commands: list[dict[str, str]], *, color: bool = False) -> str:
     lines = [style_text("Harness commands", ANSI_CYAN, color), ""]
     groups = ["work", "inspect", "learn", "quality", "setup", "runtime"]
@@ -292,7 +301,7 @@ def render_command_catalog(commands: list[dict[str, str]], *, color: bool = Fals
 def render_slash_palette(*, include_internal: bool = True, color: bool = False) -> str:
     lines = [style_text("Harness slash palette", ANSI_CYAN, color), ""]
     lines.append(style_text("Commands", ANSI_BLUE, color))
-    for command in command_catalog(include_internal=include_internal):
+    for command in slash_command_catalog(include_internal=include_internal):
         usage = slash_usage(command)
         lines.append(f"  {style_text(usage, ANSI_CYAN, color)}")
         lines.append(f"    {command['summary']}")

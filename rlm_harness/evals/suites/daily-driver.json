@@ -26,11 +26,108 @@
         "beta.txt": "beta\n"
       },
       "output_contains": [
-        "alpha.txt",
-        "beta.txt"
+        "- alpha.txt",
+        "- beta.txt"
       ],
       "output_not_contains": [
-        "__RLM_FINAL_ANSWER__"
+        "__RLM_FINAL_ANSWER__",
+        "[",
+        "]",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "explain-python-file",
+      "prompt": "Explain mathlib.py",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "mathlib.py": "def add(a, b):\n    return a + b\n"
+      },
+      "output_contains": [
+        "File Summary: mathlib.py",
+        "Functions: `add`",
+        "focused test"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "return a + b",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "find-symbol-definition",
+      "prompt": "Where is add defined?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "mathlib.py": "def add(a, b):\n    return a + b\n"
+      },
+      "output_contains": [
+        "Search Results for `add`",
+        "mathlib.py:1",
+        "def add(a, b):"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "\"stdout\"",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "git-change-summary",
+      "prompt": "What changed in this repo?",
+      "setup_commands": [
+        "git init >/dev/null && git config user.email test@example.com && git config user.name Test && git add app.py && git commit -m init >/dev/null && printf 'print(\"new\")\\n' > app.py"
+      ],
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "app.py": "print(\"old\")\n"
+      },
+      "output_contains": [
+        "Git Changes",
+        "Modified: app.py",
+        "Review the diff"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "\"stdout\"",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "test-command-question",
+      "prompt": "How do I run tests?",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "Cargo.toml": "[workspace]\nmembers = [\"crates/cli\"]\n",
+        "crates/cli/src/main.rs": "fn main() {}\n"
+      },
+      "output_contains": [
+        "Verification Commands",
+        "`cargo test`",
+        "Cargo.toml is present"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Stub response",
+        "Return one typed action JSON object",
+        "Project Summary",
+        "The user wants",
+        "Budget:",
+        "action was not valid JSON"
       ]
     },
     {
@@ -71,7 +168,11 @@
         "Key config/docs",
         "Recent commits",
         "Notable source files",
-        "Working tree:"
+        "Working tree:",
+        "The user wants",
+        "I need to",
+        "Budget:",
+        "Plan progress"
       ]
     },
     {
@@ -95,7 +196,40 @@
         "Key config/docs",
         "Recent commits",
         "Notable source files",
-        "Working tree:"
+        "Working tree:",
+        "The user wants",
+        "I need to",
+        "Budget:",
+        "Plan progress"
+      ]
+    },
+    {
+      "id": "exact-project-question-next-step",
+      "prompt": "what is this project about and what must I do next",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "README.md": "# Sansara\n\nVault-native autonomous agent OS with a Rust CLI.\n",
+        "Cargo.toml": "[workspace]\nmembers = [\"crates/sansara-cli\"]\n"
+      },
+      "output_contains": [
+        "Project Summary",
+        "Sansara",
+        "What I would do next",
+        "cargo test"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "action_parse_error",
+        "action was not valid JSON",
+        "Files inspected",
+        "Key config/docs",
+        "Recent commits",
+        "Notable source files",
+        "Working tree:",
+        "The user wants",
+        "I need to",
+        "Budget:",
+        "Plan progress"
       ]
     },
     {
@@ -112,9 +246,68 @@
       ],
       "output_not_contains": [
         "Harness tools",
+        "  /tools",
         "mcp_call_tool",
         "Traceback",
         "usage: rlm-harness"
+      ]
+    },
+    {
+      "id": "plan-json-flag-cli",
+      "prompt": "Plan a JSON flag change.",
+      "harness_args": [
+        "plan",
+        "How should we add a --json flag to this CLI?",
+        "--provider",
+        "stub",
+        "--model",
+        "stub",
+        "--no-memory"
+      ],
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "README.md": "# Planner\n\nRust CLI for developer workflows.\n",
+        "Cargo.toml": "[workspace]\nmembers = [\"crates/planner-cli\"]\n",
+        "crates/planner-cli/src/main.rs": "fn main() {}\n"
+      },
+      "output_contains": [
+        "Implementation Plan",
+        "Cargo.toml",
+        "crates/planner-cli/src/main.rs",
+        "cargo test"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Produce a concise response",
+        "Record the result",
+        "The user wants",
+        "Budget:",
+        "Plan progress",
+        "action was not valid JSON"
+      ]
+    },
+    {
+      "id": "audit-python-project-risks",
+      "prompt": "audit this project for risks and tell me the next fixes",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "README.md": "# Risky\n\nPython service.\n",
+        "pyproject.toml": "[project]\nname = \"risky\"\n"
+      },
+      "output_contains": [
+        "Project Gap Analysis",
+        "No visible Python test coverage",
+        "Next move"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "Files inspected",
+        "Working tree:",
+        "The user wants",
+        "I need to",
+        "Budget:",
+        "Plan progress",
+        "action was not valid JSON"
       ]
     },
     {

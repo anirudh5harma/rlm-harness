@@ -11,6 +11,7 @@ from rlm_harness.graph.nodes import (
     GraphRuntimeConfig,
     Nodes,
     build_final_answer,
+    deterministic_typed_action_for_task,
     executable_tool_payload,
     fallback_project_answer_if_needed,
     final_answer_from_action,
@@ -471,6 +472,111 @@ class GraphTests(unittest.TestCase):
         self.assertNotIn("Files inspected", answer)
         self.assertNotIn("Working tree:", answer)
         self.assertNotIn("{'files':", answer)
+
+    def test_normalize_list_files_payload_as_bullets(self):
+        answer = normalize_user_output(
+            '["alpha.txt", "beta.txt"]',
+            task="List files in workspace",
+        )
+
+        self.assertEqual(answer, "- alpha.txt\n- beta.txt")
+        self.assertNotIn("[", answer)
+
+    def test_file_question_selects_read_file_action(self):
+        action = deterministic_typed_action_for_task("Explain mathlib.py")
+
+        self.assertEqual(action.kind, "read_file")
+        self.assertEqual(action.path, "mathlib.py")
+
+    def test_file_observation_renders_file_summary(self):
+        answer = final_answer_from_action(
+            render_observation(
+                {
+                    "status": "ok",
+                    "stdout": "def add(a, b):\n    return a + b\n",
+                    "stderr": "",
+                    "observation_kind": "file",
+                    "path": "mathlib.py",
+                    "truncated": False,
+                }
+            ),
+            task="Explain mathlib.py",
+        )
+
+        self.assertIn("File Summary: mathlib.py", answer)
+        self.assertIn("Functions: `add`", answer)
+        self.assertIn("focused test", answer)
+        self.assertNotIn("return a + b", answer)
+
+    def test_where_question_selects_search_action(self):
+        action = deterministic_typed_action_for_task("Where is add defined?")
+
+        self.assertEqual(action.kind, "search_code")
+        self.assertEqual(action.pattern, "add")
+
+    def test_search_observation_renders_location_summary(self):
+        answer = final_answer_from_action(
+            render_observation(
+                {
+                    "status": "ok",
+                    "stdout": "mathlib.py:1:def add(a, b):\n",
+                    "stderr": "",
+                    "observation_kind": "text",
+                }
+            ),
+            task="Where is add defined?",
+        )
+
+        self.assertIn("Search Results for `add`", answer)
+        self.assertIn("mathlib.py:1 - def add(a, b):", answer)
+        self.assertIn("Open the most relevant match", answer)
+        self.assertNotIn('"stdout"', answer)
+
+    def test_git_change_question_selects_git_status_action(self):
+        action = deterministic_typed_action_for_task("What changed in this repo?")
+
+        self.assertEqual(action.kind, "git_status")
+
+    def test_git_status_observation_renders_change_summary(self):
+        answer = final_answer_from_action(
+            render_observation(
+                {
+                    "status": "ok",
+                    "stdout": " M app.py\nM cli.py\n?? notes.md\n",
+                    "stderr": "",
+                    "observation_kind": "text",
+                    "summary": "git status",
+                }
+            ),
+            task="What changed in this repo?",
+        )
+
+        self.assertIn("Git Changes", answer)
+        self.assertIn("- Modified: app.py", answer)
+        self.assertIn("- Modified: cli.py", answer)
+        self.assertIn("- Untracked: notes.md", answer)
+        self.assertIn("Review the diff", answer)
+        self.assertNotIn('"stdout"', answer)
+
+    def test_verification_question_selects_project_overview_action(self):
+        action = deterministic_typed_action_for_task("How do I run tests?")
+
+        self.assertEqual(action.kind, "project_overview")
+
+    def test_project_overview_renders_verification_commands_for_test_question(self):
+        overview = {
+            "files": ["Cargo.toml", "crates/cli/src/main.rs"],
+            "documents": [{"path": "Cargo.toml", "content": "[workspace]\n"}],
+            "git_status": "",
+            "git_log": "",
+        }
+
+        answer = normalize_user_output(json.dumps(overview), task="How do I run tests?")
+
+        self.assertIn("Verification Commands", answer)
+        self.assertIn("`cargo test`", answer)
+        self.assertIn("Cargo.toml is present.", answer)
+        self.assertNotIn("Project Summary", answer)
 
     def test_what_is_this_project_is_project_summary_task(self):
         self.assertTrue(is_project_summary_task("what is this project"))

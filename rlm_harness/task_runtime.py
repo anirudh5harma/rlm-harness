@@ -428,7 +428,11 @@ def record_run_started_event(
 
 def finalize_plan_only(state: HarnessState, traces: TraceStore) -> HarnessState:
     state.status = "done"
-    state.final_answer = render_user_plan(state.plan)
+    state.final_answer = render_user_plan(
+        state.plan,
+        task=state.task,
+        workspace=Path(state.workspace),
+    )
     traces.event(
         state.run_id,
         "final",
@@ -451,14 +455,150 @@ def finalize_plan_only(state: HarnessState, traces: TraceStore) -> HarnessState:
     return state
 
 
-def render_user_plan(plan: TaskPlan) -> str:
+def render_user_plan(
+    plan: TaskPlan,
+    *,
+    task: str = "",
+    workspace: Optional[Path] = None,
+) -> str:
     if not plan.steps:
         return "Implementation Plan\nNo plan steps were produced."
+    if looks_like_generic_plan(plan):
+        return render_workspace_grounded_plan(task, workspace)
     lines = ["Implementation Plan"]
     for step in plan.steps:
         indent = "  " if step.parent_id else ""
         lines.append(f"{indent}{step.id}. {step.description}")
     return "\n".join(lines)
+
+
+def looks_like_generic_plan(plan: TaskPlan) -> bool:
+    generic_phrases = (
+        "inspect the task",
+        "produce a concise response",
+        "record the result",
+    )
+    descriptions = [step.description.strip().lower().rstrip(".") for step in plan.steps]
+    if not descriptions or len(descriptions) > 4:
+        return False
+    matches = sum(
+        1
+        for description in descriptions
+        if any(phrase in description for phrase in generic_phrases)
+    )
+    return matches >= min(2, len(descriptions))
+
+
+def render_workspace_grounded_plan(task: str, workspace: Optional[Path]) -> str:
+    files = workspace_files(workspace) if workspace is not None else []
+    orientation = plan_orientation_files(files)
+    verification = plan_verification_command(files)
+
+    lines = ["Implementation Plan"]
+    if task.strip():
+        lines.append(f"For: {compact_marker_text(task, max_chars=140)}")
+    if orientation:
+        lines.append("Start with:")
+        lines.extend(f"- {path}" for path in orientation)
+
+    target = "the smallest owned surface"
+    if orientation:
+        target = orientation[-1]
+    lines.extend(
+        [
+            "1. Confirm the requested behavior against the current project shape.",
+            f"2. Inspect {target} and the nearby command or runtime code before editing.",
+            "3. Add or update the focused regression test for the behavior you want.",
+            "4. Make the smallest scoped change that satisfies the test and existing contracts.",
+            f"5. Run `{verification}` and report the files changed plus the result.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def workspace_files(workspace: Optional[Path], max_files: int = 300) -> list[str]:
+    if workspace is None or not workspace.exists():
+        return []
+    ignored = {
+        ".git",
+        ".hg",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".rlm_harness",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        "__pycache__",
+        "dist",
+        "build",
+        "node_modules",
+        "target",
+    }
+    files: list[str] = []
+    for path in sorted(workspace.rglob("*")):
+        try:
+            relative = path.relative_to(workspace)
+        except ValueError:
+            continue
+        if any(part in ignored for part in relative.parts):
+            continue
+        if path.is_file():
+            files.append(str(relative))
+            if len(files) >= max_files:
+                break
+    return files
+
+
+def plan_orientation_files(files: list[str]) -> list[str]:
+    preferred = [
+        "README.md",
+        "Cargo.toml",
+        "pyproject.toml",
+        "package.json",
+        "src/main.rs",
+        "src/lib.rs",
+        "main.py",
+        "app.py",
+        "src/main.ts",
+        "src/main.tsx",
+        "src/App.tsx",
+    ]
+    selected = [path for path in preferred if path in files]
+    selected.extend(
+        path
+        for path in files
+        if path.startswith("crates/") and path.endswith(("/src/main.rs", "/src/lib.rs"))
+    )
+    selected.extend(
+        path
+        for path in files
+        if path.endswith(("_cli.py", "/cli.py", "/main.py")) and path not in selected
+    )
+    return dedupe(selected)[:5]
+
+
+def plan_verification_command(files: list[str]) -> str:
+    if "Cargo.toml" in files or any(path.endswith(".rs") for path in files):
+        return "cargo test"
+    if any(path.startswith("tests/") for path in files):
+        return "pytest"
+    if any(Path(path).name.startswith("test_") and path.endswith(".py") for path in files):
+        return "python -m unittest"
+    if "pyproject.toml" in files or any(path.endswith(".py") for path in files):
+        return "python -m pytest"
+    if "package.json" in files:
+        return "npm test"
+    return "the project test command"
+
+
+def dedupe(values: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
 
 
 def emit_run_output(

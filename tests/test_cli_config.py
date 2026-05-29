@@ -167,7 +167,7 @@ class CLIConfigTests(unittest.TestCase):
         self.assertIn('/ask "what is this project?"', text)
         self.assertIn('/plan "how should we fix this?"', text)
         self.assertIn('/run "fix tests"', text)
-        self.assertIn("/tools", text)
+        self.assertNotIn("  /tools\n", text)
         self.assertIn("/mcp list|setup|add|show|tools|trust|enable", text)
         self.assertIn("/init [--provider name] [--api-key key]", text)
         self.assertIn("/sandbox build|run", text)
@@ -189,6 +189,7 @@ class CLIConfigTests(unittest.TestCase):
         self.assertIn("mcp", command_names)
         self.assertIn("palette", command_names)
         self.assertIn("sandbox", command_names)
+        self.assertNotIn("tools", command_names)
         self.assertNotIn("tools", payload)
 
     def test_commands_and_palette_use_light_cyan_when_color_is_forced(self):
@@ -1432,6 +1433,15 @@ class CLIConfigTests(unittest.TestCase):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            (workspace / "README.md").write_text("# Planner\n", encoding="utf-8")
+            (workspace / "Cargo.toml").write_text(
+                '[workspace]\nmembers = ["crates/planner-cli"]\n',
+                encoding="utf-8",
+            )
+            entrypoint = workspace / "crates" / "planner-cli" / "src" / "main.rs"
+            entrypoint.parent.mkdir(parents=True)
+            entrypoint.write_text("fn main() {}\n", encoding="utf-8")
             trace_db = Path(tmpdir) / "traces.db"
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
@@ -1459,7 +1469,10 @@ class CLIConfigTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["status"], "done")
         self.assertIn("Implementation Plan", payload["final_answer"])
-        self.assertIn("Inspect the task.", payload["final_answer"])
+        self.assertIn("Cargo.toml", payload["final_answer"])
+        self.assertIn("crates/planner-cli/src/main.rs", payload["final_answer"])
+        self.assertIn("cargo test", payload["final_answer"])
+        self.assertNotIn("Produce a concise response.", payload["final_answer"])
         self.assertIn("plan_created", event_kinds)
         self.assertIn("completion", event_kinds)
         self.assertNotIn("action_selected", event_kinds)

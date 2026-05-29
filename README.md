@@ -110,9 +110,10 @@ harness feedback add "Liked the concise summary." --rating good
 harness doctor
 ```
 
-Inside interactive mode, type `/` to show the slash palette: public commands and
-runtime commands only. Use `harness tools` when you want the lower-level action
-tool catalog. Harness keeps compatibility aliases where they are useful (`-p`,
+Inside interactive mode, type `/` to show the slash command palette, without the
+lower-level action tool catalog or `/tools` entry. Use `harness tools` when you
+explicitly want that catalog. Harness keeps
+compatibility aliases where they are useful (`-p`,
 `--plan`, `--permission-mode`, `--auto-accept`), but the primary shape is
 Harness-native: `ask` for read-only answers, `plan` for read-only implementation
 plans, `work` for edits, `continue` for thread flow, and `taste` for learning

@@ -1176,8 +1176,11 @@ def search_code(pattern: str, path: str = ".", max_count: int = 100) -> str:
     if max_count <= 0:
         raise ToolError("max_count must be positive")
     search_root = workspace_path(path)
+    search_arg = "."
+    if search_root != WORKSPACE:
+        search_arg = str(search_root.relative_to(WORKSPACE))
     result = subprocess.run(
-        ["rg", "--line-number", "--max-count", str(max_count), pattern, str(search_root)],
+        ["rg", "--line-number", "--max-count", str(max_count), pattern, search_arg],
         cwd=WORKSPACE,
         text=True,
         capture_output=True,
