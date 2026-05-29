@@ -2,10 +2,12 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from unittest.mock import patch
 
 from rlm_harness import cli
 from rlm_harness.tracing import TraceStore
@@ -160,6 +162,128 @@ class TraceStoreTests(unittest.TestCase):
         self.assertIn("Stub response", output)
         self.assertNotIn("Trace report", output)
         self.assertNotIn("run_started", output)
+
+    def test_cli_run_progress_markers_go_to_stderr(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            trace_db = str(Path(temp_dir) / "traces.db")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+                patch.dict(
+                    os.environ,
+                    {"HARNESS_PROGRESS": "1", "HARNESS_COLOR": "0"},
+                    clear=False,
+                ),
+            ):
+                exit_code = cli.main(
+                    [
+                        "run",
+                        "progress marker task",
+                        "--no-sandbox",
+                        "--no-memory",
+                        "--trace-db",
+                        trace_db,
+                        "--provider",
+                        "stub",
+                        "--model",
+                        "stub",
+                    ]
+                )
+
+        markers = stderr.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Stub response", stdout.getvalue())
+        self.assertIn("[command] harness run", markers)
+        self.assertIn("[workspace]", markers)
+        self.assertIn("[setup] memory disabled", markers)
+        self.assertIn("[done]", markers)
+        self.assertNotIn("Stub response", markers)
+
+    def test_cli_run_json_suppresses_progress_markers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            trace_db = str(Path(temp_dir) / "traces.db")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+                patch.dict(
+                    os.environ,
+                    {"HARNESS_PROGRESS": "1", "HARNESS_COLOR": "1"},
+                    clear=False,
+                ),
+            ):
+                exit_code = cli.main(
+                    [
+                        "run",
+                        "json marker task",
+                        "--no-sandbox",
+                        "--no-memory",
+                        "--trace-db",
+                        trace_db,
+                        "--provider",
+                        "stub",
+                        "--model",
+                        "stub",
+                        "--json",
+                    ]
+                )
+            payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(payload["status"], "done")
+
+    def test_cli_run_quiet_suppresses_progress_markers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            trace_db = str(Path(temp_dir) / "traces.db")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                contextlib.redirect_stdout(stdout),
+                contextlib.redirect_stderr(stderr),
+                patch.dict(
+                    os.environ,
+                    {"HARNESS_PROGRESS": "1", "HARNESS_COLOR": "1"},
+                    clear=False,
+                ),
+            ):
+                exit_code = cli.main(
+                    [
+                        "run",
+                        "quiet marker task",
+                        "--no-sandbox",
+                        "--no-memory",
+                        "--trace-db",
+                        trace_db,
+                        "--provider",
+                        "stub",
+                        "--model",
+                        "stub",
+                        "--quiet",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Stub response", stdout.getvalue())
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_run_console_colors_command_and_important_values(self):
+        stderr = io.StringIO()
+        args = Namespace(json_output=False, quiet=False, stream=False)
+        with patch.dict(
+            os.environ,
+            {"HARNESS_PROGRESS": "1", "HARNESS_COLOR": "1"},
+            clear=False,
+        ):
+            console = cli.RunConsole(args, stream=stderr)
+            console.marker("command", "harness run task", important=True)
+
+        marker = stderr.getvalue()
+        self.assertIn("\033[36m[command]\033[0m", marker)
+        self.assertIn("\033[34mharness run task\033[0m", marker)
 
     def test_json_payload_uses_final_state_answer_for_error_runs(self):
         with tempfile.TemporaryDirectory() as temp_dir:

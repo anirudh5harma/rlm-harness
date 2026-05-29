@@ -51,6 +51,17 @@ harness feedback add "Liked the concise summary and verification line." --rating
 If readiness shows Docker warnings, you can still try a non-sandboxed run with
 `harness --no-sandbox "summarize this project"` while you fix Docker.
 
+## Run experience
+
+Interactive runs show a compact progress rail on stderr while the final answer
+stays on stdout for piping and scripts. The rail uses simple markers such as
+`[command]`, `[setup]`, `[plan]`, `[work]`, `[check]`, and `[done]`; commands and
+important values are highlighted in cyan/blue when the terminal supports color.
+
+`--json`, `--stream`, and `--quiet` suppress the progress rail. Set
+`HARNESS_PROGRESS=on` or `HARNESS_PROGRESS=off` to override auto-detection, and
+`HARNESS_COLOR=on` or `HARNESS_COLOR=off` to override color.
+
 ## Common commands
 
 ```bash
