@@ -11,6 +11,8 @@ from rlm_harness.actions import (
     CompleteTaskAction,
     CompletionStatus,
     ObservationStatus,
+    ProjectAuditAction,
+    ProjectSummaryAction,
     PythonReplAction,
     RLMTaskAction,
     VerificationStatus,
@@ -450,6 +452,37 @@ class Nodes:
         return state
 
     def _select_tool_action(self, state: HarnessState) -> HarnessState:
+        deterministic_action = deterministic_typed_action_for_task(state.task)
+        if deterministic_action is not None and not state.scratch.get(
+            "deterministic_project_action_used"
+        ):
+            state.scratch["deterministic_project_action_used"] = True
+            state.scratch["pending_tool_action"] = deterministic_action.model_dump(mode="json")
+            state.history.append(
+                {
+                    "node": "act",
+                    "content": json.dumps(
+                        deterministic_action.model_dump(mode="json"),
+                        sort_keys=True,
+                    ),
+                }
+            )
+            self.traces.event(
+                state.run_id,
+                "deterministic_action_selected",
+                {"action": deterministic_action.model_dump(mode="json")},
+                node="act",
+            )
+            self.traces.record_typed_event(
+                ActionSelectedEvent(
+                    run_id=state.run_id,
+                    sequence=self.traces.next_sequence(state.run_id),
+                    node="act",
+                    action=deterministic_action,
+                )
+            )
+            return state
+
         action_content = ""
         parse_error = ""
 
@@ -510,15 +543,43 @@ class Nodes:
                     node="act",
                 )
         else:
-            observation = {
-                "status": "action_parse_error",
-                "stdout": "",
-                "stderr": parse_error,
-                "action": action_content,
-            }
-            rendered = render_observation(observation)
-            state.scratch["last_action"] = rendered
-            state.history.append({"node": "act", "content": rendered})
+            action = fallback_typed_action_for_task(state.task)
+            if action is not None:
+                state.scratch["pending_tool_action"] = action.model_dump(mode="json")
+                state.history.append(
+                    {
+                        "node": "act",
+                        "content": json.dumps(action.model_dump(mode="json"), sort_keys=True),
+                    }
+                )
+                self.traces.event(
+                    state.run_id,
+                    "action_parse_recovered",
+                    {
+                        "message": parse_error,
+                        "content": action_content,
+                        "fallback_action": action.model_dump(mode="json"),
+                    },
+                    node="act",
+                )
+                self.traces.record_typed_event(
+                    ActionSelectedEvent(
+                        run_id=state.run_id,
+                        sequence=self.traces.next_sequence(state.run_id),
+                        node="act",
+                        action=action,
+                    )
+                )
+            else:
+                observation = {
+                    "status": "action_parse_error",
+                    "stdout": "",
+                    "stderr": parse_error,
+                    "action": action_content,
+                }
+                rendered = render_observation(observation)
+                state.scratch["last_action"] = rendered
+                state.history.append({"node": "act", "content": rendered})
         return state
 
     def _select_sandbox_action(self, state: HarnessState) -> HarnessState:
@@ -932,6 +993,20 @@ class Nodes:
             return state
 
         if observation_payload and observation_payload.get("status") == "ok":
+            user_output = observation_user_output(observation_payload)
+            if user_output and is_informational_task(state.task) and not is_code_editing_task(
+                state.task
+            ):
+                self.traces.event(
+                    state.run_id,
+                    "reflection",
+                    {
+                        "decision": "done",
+                        "content": "informational task produced a user-facing answer",
+                    },
+                    node="reflect",
+                )
+                return self.done(state)
             verification_passed = self._check_verification_result(state)
             if state.scratch.pop("action_completed", False):
                 if verification_passed:
@@ -1244,15 +1319,20 @@ class Nodes:
         messages = [
             Msg(
                 role="system",
-                content="Synthesize a partial answer from what was accomplished.",
+                content=(
+                    "Write a concise user-facing partial answer. Do not reveal chain "
+                    "of thought, hidden reasoning, internal graph steps, budgets, or "
+                    "implementation notes. If evidence is limited, say what was "
+                    "actually inspected and give concrete next steps."
+                ),
             ),
             Msg(
                 role="user",
                 content=(
+                    "Return only the final answer the user should see.\n"
                     f"Task: {state.task}\n"
                     f"Completed ({len(completed)}): {completed_desc}\n"
                     f"Not done ({len(pending)}): {pending_desc}\n"
-                    f"Budget: {state.budget.progress_summary}\n"
                     f"Last output: {state.history[-1]['content'] if state.history else 'none'}"
                 ),
             ),
@@ -1273,12 +1353,17 @@ class Nodes:
                 node="reflect",
             )
             return state
-        state.final_answer = completion.content
+        state.final_answer = sanitize_partial_answer(
+            completion.content,
+            state,
+            completed_desc,
+            pending_desc,
+        )
         state.status = "stopped"
         self.traces.event(
             state.run_id,
             "finalize_partial",
-            {"partial_answer": completion.content},
+            {"partial_answer": state.final_answer},
             node="reflect",
         )
         return state
@@ -1504,6 +1589,18 @@ def build_final_answer(
     return answer
 
 
+def fallback_typed_action_for_task(task: str):
+    return deterministic_typed_action_for_task(task)
+
+
+def deterministic_typed_action_for_task(task: str):
+    if is_project_summary_task(task):
+        return ProjectSummaryAction()
+    if is_project_audit_task(task):
+        return ProjectAuditAction()
+    return None
+
+
 def verification_result_summary(verification: object) -> str:
     if isinstance(verification, VerificationResult):
         return verification.summary.strip()
@@ -1527,6 +1624,75 @@ def verification_result_summary(verification: object) -> str:
             line += f": {output[:500]}"
         lines.append(line)
     return "\n".join(lines)
+
+
+def sanitize_partial_answer(
+    answer: str,
+    state: HarnessState,
+    completed_desc: list[str],
+    pending_desc: list[str],
+) -> str:
+    cleaned = answer.strip()
+    if cleaned and not looks_like_internal_reasoning_answer(cleaned):
+        return cleaned
+    return render_partial_user_answer(state, completed_desc, pending_desc)
+
+
+def looks_like_internal_reasoning_answer(answer: str) -> bool:
+    lowered = answer.lstrip().lower()
+    internal_starts = (
+        "the user wants",
+        "i need to",
+        "we need to",
+        "let me",
+        "looking at the",
+    )
+    return lowered.startswith(internal_starts) or any(
+        marker in lowered
+        for marker in (
+            "budget:",
+            "plan progress",
+            "completed (",
+            "not done (",
+            "hidden reasoning",
+        )
+    )
+
+
+def render_partial_user_answer(
+    state: HarnessState,
+    completed_desc: list[str],
+    pending_desc: list[str],
+) -> str:
+    lines = [
+        (
+            f"I only completed part of `{state.task}`, "
+            "but here is the useful state so far."
+        )
+    ]
+    last_output = state.history[-1]["content"] if state.history else ""
+    if isinstance(last_output, str) and last_output.strip():
+        finding = final_answer_from_action(last_output, task=state.task).strip()
+        if finding and not looks_like_internal_reasoning_answer(finding):
+            lines.append("")
+            lines.append("What I found:")
+            lines.append(compact_answer_snippet(finding))
+    if completed_desc:
+        lines.append("")
+        lines.append("Completed:")
+        lines.extend(f"- {item}" for item in completed_desc[:3])
+    if pending_desc:
+        lines.append("")
+        lines.append("What I would do next:")
+        lines.extend(f"- {item}" for item in pending_desc[:3])
+    return "\n".join(lines)
+
+
+def compact_answer_snippet(text: str, max_chars: int = 900) -> str:
+    compact = text.strip()
+    if len(compact) <= max_chars:
+        return compact
+    return compact[:max_chars].rstrip() + "..."
 
 
 def command_observation_from_payload(

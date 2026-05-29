@@ -75,6 +75,30 @@
       ]
     },
     {
+      "id": "combined-project-question-next-step",
+      "prompt": "what is this project about and what should we build next",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "README.md": "# Agent Kit\n\nRust CLI for local coding agents.\n",
+        "Cargo.toml": "[workspace]\nmembers = [\"crates/cli\"]\n"
+      },
+      "output_contains": [
+        "Project Summary",
+        "Agent Kit",
+        "What I would do next",
+        "cargo test"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__",
+        "action was not valid JSON",
+        "Files inspected",
+        "Key config/docs",
+        "Recent commits",
+        "Notable source files",
+        "Working tree:"
+      ]
+    },
+    {
       "id": "slash-palette-cli",
       "prompt": "Show the slash palette.",
       "harness_args": [
@@ -84,10 +108,11 @@
       "output_contains": [
         "Harness slash palette",
         "/mcp list|setup|add|show|tools|trust|enable",
-        "/taste list|context|learn|scan|approve|reject",
-        "mcp_call_tool"
+        "/taste list|context|learn|scan|approve|reject"
       ],
       "output_not_contains": [
+        "Harness tools",
+        "mcp_call_tool",
         "Traceback",
         "usage: rlm-harness"
       ]

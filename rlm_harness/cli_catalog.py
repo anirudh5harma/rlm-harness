@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from typing import TextIO
 
-from rlm_harness.tools import render_tool_catalog
-
 PUBLIC_COMMANDS = {
     "ask",
     "commands",
@@ -45,7 +43,7 @@ DEFAULT_PROG = "harness"
 
 ANSI_RESET = "\033[0m"
 ANSI_CYAN = "\033[96m"
-ANSI_BLUE = "\033[94m"
+ANSI_BLUE = ANSI_CYAN
 ANSI_RED = "\033[31m"
 
 COMMAND_CATALOG = [
@@ -113,7 +111,7 @@ COMMAND_CATALOG = [
         "name": "palette",
         "usage": "harness /",
         "group": "inspect",
-        "summary": "Show slash commands and action tools in one view.",
+        "summary": "Show slash commands in one view.",
     },
     {
         "name": "readiness",
@@ -298,8 +296,6 @@ def render_slash_palette(*, include_internal: bool = True, color: bool = False) 
         usage = slash_usage(command)
         lines.append(f"  {style_text(usage, ANSI_CYAN, color)}")
         lines.append(f"    {command['summary']}")
-    lines.append("")
-    lines.append(render_tool_catalog(include_internal=include_internal))
     lines.append("")
     lines.append("Tip: Type `/command ...` to run a command, or a plain task to start work.")
     return "\n".join(lines).rstrip()

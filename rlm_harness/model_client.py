@@ -242,6 +242,8 @@ class LMClient:
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        if should_request_json_response(messages):
+            payload["response_format"] = {"type": "json_object"}
         headers = {
             "Content-Type": "application/json",
             "User-Agent": USER_AGENT,
@@ -249,26 +251,38 @@ class LMClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        request = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
-                raw = json.loads(response.read().decode("utf-8"))
+            raw = post_openai_compatible_chat(url, payload, headers, self.timeout_s)
         except urllib.error.HTTPError as exc:
             detail = _read_http_error_detail(exc)
-            message = f"model request failed: HTTP {exc.code} {exc.reason}"
-            if detail:
-                message = f"{message}: {detail}"
-            raise LMClientError(message) from exc
-        except urllib.error.URLError as exc:
-            raise LMClientError(f"model request failed: {exc}") from exc
+            if should_retry_without_response_format(exc.code, detail, payload):
+                fallback_payload = dict(payload)
+                fallback_payload.pop("response_format", None)
+                try:
+                    raw = post_openai_compatible_chat(
+                        url,
+                        fallback_payload,
+                        headers,
+                        self.timeout_s,
+                    )
+                except urllib.error.HTTPError as retry_exc:
+                    retry_detail = _read_http_error_detail(retry_exc)
+                    message = (
+                        f"model request failed: HTTP {retry_exc.code} "
+                        f"{retry_exc.reason}"
+                    )
+                    if retry_detail:
+                        message = f"{message}: {retry_detail}"
+                    raise LMClientError(message) from retry_exc
+            else:
+                message = f"model request failed: HTTP {exc.code} {exc.reason}"
+                if detail:
+                    message = f"{message}: {detail}"
+                raise LMClientError(message) from exc
         except json.JSONDecodeError as exc:
             raise LMClientError("model response was not valid JSON") from exc
+        except urllib.error.URLError as exc:
+            raise LMClientError(f"model request failed: {exc}") from exc
 
         try:
             content = raw["choices"][0]["message"]["content"] or ""
@@ -287,6 +301,58 @@ class LMClient:
             completion_tokens=usage.get("completion_tokens"),
             raw=raw,
         )
+
+
+def should_request_json_response(messages: list[Msg]) -> bool:
+    content = "\n".join(message.content for message in messages).lower()
+    return any(
+        phrase in content
+        for phrase in (
+            "return one typed action json object",
+            "return only valid json for this action",
+            "return exactly one json object",
+            "the schema is:",
+        )
+    )
+
+
+def should_retry_without_response_format(
+    status_code: int,
+    detail: str,
+    payload: dict,
+) -> bool:
+    if "response_format" not in payload or status_code not in {400, 422}:
+        return False
+    lowered = detail.lower()
+    return any(
+        hint in lowered
+        for hint in (
+            "response_format",
+            "json_object",
+            "unsupported parameter",
+            "unrecognized request argument",
+            "not supported",
+        )
+    )
+
+
+def post_openai_compatible_chat(
+    url: str,
+    payload: dict,
+    headers: dict[str, str],
+    timeout_s: int,
+) -> dict:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout_s) as response:
+        raw = json.loads(response.read().decode("utf-8"))
+    if not isinstance(raw, dict):
+        raise LMClientError("model response was not a JSON object")
+    return raw
 
 
 def is_project_summary_prompt(lowered_user_text: str) -> bool:

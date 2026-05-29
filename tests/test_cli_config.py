@@ -157,7 +157,7 @@ class CLIConfigTests(unittest.TestCase):
         self.assertEqual(report["final_answer"], "done")
         self.assertEqual(events[0]["kind"], "final")
 
-    def test_slash_palette_lists_commands_and_tools(self):
+    def test_slash_palette_lists_commands_only(self):
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
             self.assertEqual(cli.main(["/"]), 0)
@@ -171,31 +171,27 @@ class CLIConfigTests(unittest.TestCase):
         self.assertIn("/mcp list|setup|add|show|tools|trust|enable", text)
         self.assertIn("/init [--provider name] [--api-key key]", text)
         self.assertIn("/sandbox build|run", text)
-        self.assertIn("Harness tools", text)
-        self.assertIn("read_file [read]", text)
-        self.assertIn("project_summary [read]", text)
-        self.assertIn("complete_task [low]", text)
-        self.assertIn("python_repl [medium]", text)
+        self.assertNotIn("Harness tools", text)
+        self.assertNotIn("read_file [read]", text)
+        self.assertNotIn("project_summary [read]", text)
+        self.assertNotIn("complete_task [low]", text)
+        self.assertNotIn("python_repl [medium]", text)
 
-    def test_slash_palette_json_lists_commands_and_tools(self):
+    def test_slash_palette_json_lists_commands_only(self):
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
             self.assertEqual(cli.main(["/help", "--json"]), 0)
 
         payload = json.loads(stdout.getvalue())
         command_names = {command["name"] for command in payload["commands"]}
-        tool_names = {tool["name"] for tool in payload["tools"]}
 
         self.assertIn("ask", command_names)
         self.assertIn("mcp", command_names)
         self.assertIn("palette", command_names)
         self.assertIn("sandbox", command_names)
-        self.assertIn("read_file", tool_names)
-        self.assertIn("project_summary", tool_names)
-        self.assertIn("complete_task", tool_names)
-        self.assertIn("python_repl", tool_names)
+        self.assertNotIn("tools", payload)
 
-    def test_commands_and_palette_use_cyan_blue_when_color_is_forced(self):
+    def test_commands_and_palette_use_light_cyan_when_color_is_forced(self):
         for command in (["commands"], ["/"]):
             with self.subTest(command=command):
                 stdout = io.StringIO()
@@ -206,7 +202,7 @@ class CLIConfigTests(unittest.TestCase):
 
                 text = stdout.getvalue()
                 self.assertIn("\033[96m", text)
-                self.assertIn("\033[94m", text)
+                self.assertNotIn("\033[94m", text)
 
     def test_interactive_slash_prints_full_palette(self):
         stdout = io.StringIO()
@@ -217,7 +213,7 @@ class CLIConfigTests(unittest.TestCase):
         self.assertIn("Harness interactive mode", text)
         self.assertIn("Harness slash palette", text)
         self.assertIn("/mcp list|setup|add|show|tools|trust|enable", text)
-        self.assertIn("python_repl [medium]", text)
+        self.assertNotIn("python_repl [medium]", text)
 
     def test_interactive_slash_command_dispatches_with_arguments(self):
         with patch("builtins.input", side_effect=["/mcp list --json", "/q"]), patch.object(

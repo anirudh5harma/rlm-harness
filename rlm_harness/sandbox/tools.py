@@ -1073,10 +1073,12 @@ def write_file(path: str, content: str) -> str:
 def apply_patch(diff: str, timeout: float = DEFAULT_TIMEOUT_S) -> str:
     if not diff.strip():
         raise ToolError("diff must be non-empty")
+    env = git_workspace_env(WORKSPACE)
     result = subprocess.run(
         ["git", "apply", "--whitespace=nowarn", "-"],
         input=diff,
         cwd=WORKSPACE,
+        env=env,
         text=True,
         capture_output=True,
         timeout=timeout,
@@ -1085,6 +1087,16 @@ def apply_patch(diff: str, timeout: float = DEFAULT_TIMEOUT_S) -> str:
     if result.returncode != 0:
         raise ToolError(render_command_failure(result))
     return "patch applied"
+
+
+def git_workspace_env(workspace: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    parent = workspace.resolve().parent
+    existing = env.get("GIT_CEILING_DIRECTORIES")
+    env["GIT_CEILING_DIRECTORIES"] = (
+        str(parent) if not existing else f"{parent}{os.pathsep}{existing}"
+    )
+    return env
 
 
 def run_shell(

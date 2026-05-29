@@ -199,6 +199,82 @@ class TypedProjectSummaryClient(LMClient):
         )
 
 
+class NonJsonProjectSummaryClient(LMClient):
+    def __init__(self):
+        super().__init__(provider="stub")
+        self.action_calls = 0
+
+    def complete(self, messages, max_tokens=512, temperature=0.2):
+        user_text = ""
+        for message in reversed(list(messages)):
+            if message.role == "user":
+                user_text = message.content
+                break
+
+        if "Return a concise numbered plan" in user_text:
+            content = "1. Summarize the project"
+        elif "Return one typed action JSON object" in user_text:
+            self.action_calls += 1
+            content = "I should inspect the project first."
+        elif "Decide whether the task is complete" in user_text:
+            content = "done"
+        else:
+            content = "done"
+
+        return Completion(
+            content=content,
+            model="non-json-summary",
+            provider="test",
+            latency_ms=0,
+        )
+
+
+class ActionKindProjectSummaryClient(LMClient):
+    def __init__(self):
+        super().__init__(provider="stub")
+        self.action_calls = 0
+
+    def complete(self, messages, max_tokens=512, temperature=0.2):
+        user_text = ""
+        for message in reversed(list(messages)):
+            if message.role == "user":
+                user_text = message.content
+                break
+
+        if "Return a concise numbered plan" in user_text:
+            content = "1. Summarize the project"
+        elif "Return one typed action JSON object" in user_text:
+            self.action_calls += 1
+            content = '{"action_kind":"project_summary","max_files":80}'
+        elif "Decide whether the task is complete" in user_text:
+            content = "done"
+        else:
+            content = "done"
+
+        return Completion(
+            content=content,
+            model="action-kind-summary",
+            provider="test",
+            latency_ms=0,
+        )
+
+
+class ReasoningPartialClient(LMClient):
+    def __init__(self):
+        super().__init__(provider="stub")
+
+    def complete(self, messages, max_tokens=512, temperature=0.2):
+        return Completion(
+            content=(
+                "The user wants me to summarize the partial state. "
+                "Budget: iteration 3/3. I need to explain what happened."
+            ),
+            model="reasoning-partial",
+            provider="test",
+            latency_ms=0,
+        )
+
+
 class BadThenGoodTypedActionClient(LMClient):
     def __init__(self):
         super().__init__(provider="stub")
@@ -281,6 +357,20 @@ class GraphTests(unittest.TestCase):
 
         self.assertEqual(action.kind, "project_summary")
         self.assertEqual(action.max_files, 20)
+
+    def test_parse_typed_tool_action_accepts_jsonish_mapping(self):
+        action = parse_typed_tool_action("{'kind': 'project_summary', 'max_files': 20,}")
+
+        self.assertEqual(action.kind, "project_summary")
+        self.assertEqual(action.max_files, 20)
+
+    def test_parse_typed_tool_action_accepts_action_kind_alias(self):
+        action = parse_typed_tool_action(
+            '{"action_kind":"project_overview","max_files":50,"max_read_bytes":8192}'
+        )
+
+        self.assertEqual(action.kind, "project_overview")
+        self.assertEqual(action.max_files, 50)
 
     def test_parse_typed_tool_action_accepts_tool_wrapper(self):
         action = parse_typed_tool_action(
@@ -1509,7 +1599,7 @@ class GraphTests(unittest.TestCase):
             typed_events = traces.typed_events(run_id)
 
         self.assertEqual(final_state.status, "done")
-        self.assertEqual(client.action_calls, 1)
+        self.assertEqual(client.action_calls, 0)
         self.assertIn("Project Summary", final_state.final_answer)
         self.assertTrue(any(isinstance(event, ActionSelectedEvent) for event in typed_events))
         self.assertTrue(any(isinstance(event, ObservationRecordedEvent) for event in typed_events))
@@ -1580,6 +1670,71 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(client.action_calls, 2)
         self.assertIn("Done via typed tools.", final_state.final_answer)
         self.assertIn("action_parse_error", report)
+
+    def test_tool_action_engine_falls_back_for_project_summary_parse_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "README.md").write_text(
+                "# Example\n\nA tiny project for testing fallback summaries.\n",
+                encoding="utf-8",
+            )
+            traces = TraceStore(workspace / "traces.db")
+            run_id = traces.start_run("what is this project about", str(workspace))
+            state = HarnessState(
+                task="what is this project about",
+                workspace=str(workspace),
+                thread_id=run_id,
+                run_id=run_id,
+            )
+            state.scratch["deterministic_project_action_used"] = True
+            client = NonJsonProjectSummaryClient()
+            runtime = GraphRuntimeConfig(
+                sandbox_enabled=True,
+                act_engine="tool",
+                max_action_retries=0,
+                max_iterations=3,
+            )
+            graph = build_graph(Nodes(client, traces, runtime), backend="simple")
+            final_state = graph.invoke(state)
+            report = traces.render_report(run_id)
+
+        self.assertEqual(final_state.status, "done")
+        self.assertEqual(client.action_calls, 1)
+        self.assertIn("Project Summary", final_state.final_answer)
+        self.assertIn("fallback summaries", final_state.final_answer)
+        self.assertIn("action_parse_recovered", report)
+
+    def test_tool_action_engine_accepts_action_kind_alias_from_provider(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "README.md").write_text(
+                "# Alias Project\n\nA tiny project for action kind alias tests.\n",
+                encoding="utf-8",
+            )
+            traces = TraceStore(workspace / "traces.db")
+            run_id = traces.start_run("what is this project about", str(workspace))
+            state = HarnessState(
+                task="what is this project about",
+                workspace=str(workspace),
+                thread_id=run_id,
+                run_id=run_id,
+            )
+            state.scratch["deterministic_project_action_used"] = True
+            client = ActionKindProjectSummaryClient()
+            runtime = GraphRuntimeConfig(
+                sandbox_enabled=True,
+                act_engine="tool",
+                max_action_retries=0,
+                max_iterations=3,
+            )
+            graph = build_graph(Nodes(client, traces, runtime), backend="simple")
+            final_state = graph.invoke(state)
+            report = traces.render_report(run_id)
+
+        self.assertEqual(final_state.status, "done")
+        self.assertEqual(client.action_calls, 1)
+        self.assertIn("Alias Project", final_state.final_answer)
+        self.assertNotIn("action_parse_error", report)
 
     def test_tool_action_engine_enforces_ask_read_only_mode(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1840,6 +1995,44 @@ class GraphTests(unittest.TestCase):
             self.assertEqual(final_state.status, "stopped")
             self.assertTrue(final_state.final_answer)
             self.assertIn("multi-step", final_state.final_answer)
+
+    def test_partial_answer_hides_internal_reasoning(self):
+        from rlm_harness.graph.planning import parse_structured_plan
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            traces = TraceStore(Path(temp_dir) / "traces.db")
+            run_id = traces.start_run("what is this project about", temp_dir)
+            state = HarnessState(
+                task="what is this project about",
+                workspace=temp_dir,
+                thread_id=run_id,
+                run_id=run_id,
+            )
+            state.plan = parse_structured_plan(
+                "1. Read README\n2. Inspect source\n3. Suggest next build"
+            )
+            state.history.append(
+                {
+                    "node": "observe",
+                    "content": render_observation(
+                        {
+                            "status": "ok",
+                            "stdout": "# Agent Kit\n\nRust CLI for local coding agents.",
+                            "stderr": "",
+                        }
+                    ),
+                }
+            )
+
+            nodes = Nodes(ReasoningPartialClient(), traces)
+            final_state = nodes.finalize_partial(state)
+
+        self.assertEqual(final_state.status, "stopped")
+        self.assertIn("What I found", final_state.final_answer)
+        self.assertIn("Rust CLI for local coding agents", final_state.final_answer)
+        self.assertIn("What I would do next", final_state.final_answer)
+        self.assertNotIn("The user wants", final_state.final_answer)
+        self.assertNotIn("Budget:", final_state.final_answer)
 
 
 if __name__ == "__main__":
