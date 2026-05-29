@@ -9,6 +9,8 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
+import tomllib
+
 from rlm_harness import cli, config
 
 
@@ -100,6 +102,15 @@ class CLIConfigTests(unittest.TestCase):
 
         self.assertIn('harness = "rlm_harness.cli:main"', pyproject)
         self.assertIn('rlm-harness = "rlm_harness.cli:main"', pyproject)
+
+    def test_langgraph_is_packaged_for_default_installs(self):
+        pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+
+        dependencies = pyproject["project"]["dependencies"]
+
+        self.assertIn("langgraph>=0.2", dependencies)
+        self.assertIn("langgraph-checkpoint-sqlite>=3.1", dependencies)
+        self.assertEqual(pyproject["project"]["optional-dependencies"]["graph"], [])
 
     def test_build_client_uses_api_key_argument_before_environment(self):
         args = Namespace(

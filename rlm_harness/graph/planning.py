@@ -59,7 +59,7 @@ def parse_structured_plan(text: str) -> TaskPlan:
         )
 
     if not steps:
-        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
         steps = [
             PlanStep(id=str(i + 1), description=line.lstrip("-* ").strip())
             for i, line in enumerate(lines)

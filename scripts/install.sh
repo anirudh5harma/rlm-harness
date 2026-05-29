@@ -105,7 +105,7 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 
 "$VENV_DIR/bin/python" -m pip install --quiet --upgrade pip
-"$VENV_DIR/bin/python" -m pip install --quiet --upgrade "$SRC_DIR[graph]"
+"$VENV_DIR/bin/python" -m pip install --quiet --upgrade "$SRC_DIR"
 
 cat > "$BIN_DIR/harness" <<EOF
 #!/usr/bin/env sh

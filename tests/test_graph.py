@@ -9,6 +9,7 @@ from rlm_harness.graph.build import build_graph
 from rlm_harness.graph.nodes import (
     GraphRuntimeConfig,
     Nodes,
+    build_final_answer,
     fallback_project_answer_if_needed,
     final_answer_from_action,
     is_code_editing_task,
@@ -25,8 +26,11 @@ from rlm_harness.graph.nodes import (
     render_observation,
     rlm_action_context,
 )
+from rlm_harness.graph.verification import VerificationGate
 from rlm_harness.memory import Memory, MemoryPagingConfig
+from rlm_harness.memory.evolution import EvolutionProposalStore
 from rlm_harness.model_client import LMClient
+from rlm_harness.rlm.runtime import find_repl_blocks
 from rlm_harness.sandbox import DockerREPL, SandboxConfig
 from rlm_harness.sandbox import tools as sandbox_tools
 from rlm_harness.tracing import TraceStore
@@ -211,6 +215,7 @@ class GraphTests(unittest.TestCase):
 
     def test_what_is_this_project_is_project_summary_task(self):
         self.assertTrue(is_project_summary_task("what is this project"))
+        self.assertTrue(is_project_summary_task("what is this porject about"))
         self.assertTrue(is_informational_task("what is this project"))
 
     def test_project_gap_prompt_is_audit_task(self):
@@ -219,10 +224,104 @@ class GraphTests(unittest.TestCase):
         self.assertTrue(is_project_audit_task(task))
         self.assertTrue(is_informational_task(task))
 
+    def test_project_next_steps_prompt_is_audit_task(self):
+        task = "what is this porject about and what must be done next"
+
+        self.assertTrue(is_project_summary_task(task))
+        self.assertTrue(is_project_audit_task(task))
+        self.assertTrue(is_informational_task(task))
+        self.assertFalse(
+            looks_like_project_audit(
+                "Project Summary\n"
+                "Recent commits:\n"
+                "2eefcc2 fixed technical gaps\n"
+                "Notable source files:\n"
+                "- pyproject.toml"
+            )
+        )
+
     def test_code_edit_task_requires_change_or_verification_evidence(self):
         self.assertTrue(is_code_editing_task("fix failing tests in mathlib.py"))
         self.assertFalse(looks_like_code_edit_result("done"))
         self.assertTrue(looks_like_code_edit_result("Changed mathlib.py\nVerification: pytest OK"))
+
+    def test_rlm_runtime_accepts_python_fenced_cells(self):
+        self.assertEqual(find_repl_blocks("```python\nprint(1)\n```"), ["print(1)"])
+
+    def test_build_final_answer_appends_verification_for_code_edits(self):
+        answer = build_final_answer(
+            render_observation({"status": "ok", "stdout": "Done", "stderr": ""}),
+            task="Fix failing test in mathlib.py",
+            verification={
+                "summary": "  [PASS] project_command: Ran 1 test | OK",
+                "checks": [],
+            },
+        )
+
+        self.assertIn("Completed the requested code change.", answer)
+        self.assertIn("Verification", answer)
+        self.assertIn("OK", answer)
+
+    def test_reflect_honors_rlm_completion_signal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            traces = TraceStore(Path(temp_dir) / "traces.db")
+            run_id = traces.start_run("List files in workspace", temp_dir)
+            state = HarnessState(
+                task="List files in workspace",
+                workspace=temp_dir,
+                thread_id=run_id,
+                run_id=run_id,
+            )
+            state.scratch["action_completed"] = True
+            state.history.append(
+                {
+                    "node": "observe",
+                    "content": render_observation(
+                        {
+                            "status": "ok",
+                            "stdout": "The workspace contains alpha.txt and beta.txt.",
+                            "stderr": "",
+                        }
+                    ),
+                }
+            )
+
+            final_state = Nodes(LMClient(provider="stub"), traces).reflect(state)
+
+        self.assertEqual(final_state.status, "done")
+        self.assertIn("alpha.txt", final_state.final_answer)
+
+    def test_reflect_synthesizes_code_edit_answer_after_verified_empty_completion(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            traces = TraceStore(Path(temp_dir) / "traces.db")
+            run_id = traces.start_run("Fix failing test in mathlib.py", temp_dir)
+            state = HarnessState(
+                task="Fix failing test in mathlib.py",
+                workspace=temp_dir,
+                thread_id=run_id,
+                run_id=run_id,
+            )
+            state.scratch["action_completed"] = True
+            state.scratch["verification_result"] = {
+                "passed": True,
+                "summary": "  [PASS] project_command: Ran 1 test | OK",
+                "checks": [],
+            }
+            state.history.append(
+                {
+                    "node": "observe",
+                    "content": render_observation(
+                        {"status": "ok", "stdout": "", "stderr": ""}
+                    ),
+                }
+            )
+
+            final_state = Nodes(LMClient(provider="stub"), traces).reflect(state)
+
+        self.assertEqual(final_state.status, "done")
+        self.assertIn("Completed the requested code change.", final_state.final_answer)
+        self.assertIn("Verification", final_state.final_answer)
+        self.assertIn("OK", final_state.final_answer)
 
     def test_action_prompt_routes_project_summary_to_summary_tool(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -674,6 +773,114 @@ class GraphTests(unittest.TestCase):
         self.assertIn("Memory context", client.plan_prompt)
         self.assertIn("memory_hydrated", report)
 
+    def test_taste_learning_from_run_is_injected_into_future_plan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir)
+            profile_memory = Memory(path / "profile.db")
+            traces = TraceStore(path / "traces.db")
+            try:
+                first_run = traces.start_run(
+                    "I prefer concise final answers and minimal diffs.",
+                    temp_dir,
+                    "taste-thread",
+                )
+                first_state = HarnessState(
+                    task="I prefer concise final answers and minimal diffs.",
+                    workspace=temp_dir,
+                    thread_id="taste-thread",
+                    run_id=first_run,
+                )
+                runtime = GraphRuntimeConfig(profile_memory=profile_memory)
+                graph = build_graph(
+                    Nodes(LMClient(provider="stub"), traces, runtime),
+                    backend="simple",
+                )
+                first_final = graph.invoke(first_state)
+
+                client = CapturingClient()
+                second_run = traces.start_run(
+                    "summarize this project",
+                    temp_dir,
+                    "taste-thread",
+                )
+                second_state = HarnessState(
+                    task="summarize this project",
+                    workspace=temp_dir,
+                    thread_id="taste-thread",
+                    run_id=second_run,
+                )
+                graph = build_graph(Nodes(client, traces, runtime), backend="simple")
+                second_final = graph.invoke(second_state)
+                proposals = EvolutionProposalStore(profile_memory).proposals()
+                report = traces.render_report(first_run)
+            finally:
+                profile_memory.close()
+
+        self.assertEqual(first_final.status, "done")
+        self.assertEqual(second_final.status, "done")
+        self.assertIn("Taste context", client.plan_prompt)
+        self.assertIn("concise final answers", client.plan_prompt)
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(proposals[0].kind, "prompt_rule")
+        self.assertIn("concise final answers", proposals[0].body)
+        self.assertIn("taste_learned", report)
+        self.assertIn("evolution_proposed", report)
+
+    def test_completion_marker_becomes_clean_user_output(self):
+        answer = final_answer_from_action(
+            render_observation(
+                {
+                    "status": "ok",
+                    "stdout": (
+                        '__RLM_FINAL_ANSWER__"Changed files: app.py'
+                        '\\nVerification: pytest"\n'
+                    ),
+                    "stderr": "",
+                }
+            )
+        )
+
+        self.assertEqual(answer, "Changed files: app.py\nVerification: pytest")
+
+    def test_verification_discovers_project_native_commands(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "pyproject.toml").write_text(
+                "[project]\nname = 'demo'\n[project.optional-dependencies]\ndev = ['pytest']\n",
+                encoding="utf-8",
+            )
+            (workspace / "tests").mkdir()
+            (workspace / "tests" / "test_ok.py").write_text(
+                "def test_ok():\n    assert True\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "init"], cwd=workspace, capture_output=True, check=False)
+            (workspace / "app.py").write_text("print('ok')\n", encoding="utf-8")
+
+            result = VerificationGate(workspace).verify()
+
+        commands = [check.command for check in result.checks]
+        self.assertIn("python -m pytest -q", commands)
+        self.assertTrue(result.passed)
+
+    def test_verification_runs_root_unittest_files_without_git(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "test_mathlib.py").write_text(
+                "import unittest\n\n"
+                "class MathTests(unittest.TestCase):\n"
+                "    def test_ok(self):\n"
+                "        self.assertEqual(2 + 3, 5)\n",
+                encoding="utf-8",
+            )
+
+            result = VerificationGate(workspace).verify()
+
+        commands = [check.command for check in result.checks]
+        self.assertIn("python -m unittest discover -v", commands)
+        self.assertTrue(result.passed)
+        self.assertIn("OK", result.summary)
+
     def test_reflect_continues_informational_task_when_action_prints_nothing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             traces = TraceStore(Path(temp_dir) / "traces.db")
@@ -976,7 +1183,6 @@ class GraphTests(unittest.TestCase):
             path = Path(temp_dir)
             thread_id = "checkpoint-thread-1"
             memory = Memory(path / "memory.db")
-            traces = TraceStore(path / "traces.db")
             state = HarnessState(
                 task="three step task: first summarize, then audit, then list files",
                 workspace=temp_dir,
@@ -984,7 +1190,7 @@ class GraphTests(unittest.TestCase):
                 run_id="checkpoint-run-1",
             )
             from rlm_harness.graph.checkpoint import CheckpointManager
-            from rlm_harness.graph.planning import parse_structured_plan, advance_to_next_step
+            from rlm_harness.graph.planning import advance_to_next_step, parse_structured_plan
 
             state.plan = parse_structured_plan(
                 "1. First step\n2. Second step\n3. Third step"
@@ -1028,7 +1234,7 @@ class GraphTests(unittest.TestCase):
 
             # Pre-seed a checkpoint
             from rlm_harness.graph.checkpoint import CheckpointManager
-            from rlm_harness.graph.planning import parse_structured_plan, advance_to_next_step
+            from rlm_harness.graph.planning import advance_to_next_step, parse_structured_plan
 
             temp_state = HarnessState(
                 task="resume me",

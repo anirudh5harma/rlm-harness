@@ -30,11 +30,21 @@ def is_informational_task(task: str) -> bool:
     return any(term in lowered for term in terms)
 
 
+PROJECT_SUBJECT_RE = re.compile(
+    r"\b(project|porject|repo|repository|codebase|workspace|application|app)\b"
+)
+
+
+def normalize_task_text(task: str) -> str:
+    return task.lower().replace("porject", "project")
+
+
+def has_project_subject(task: str) -> bool:
+    return bool(PROJECT_SUBJECT_RE.search(task))
+
+
 def is_project_summary_task(task: str) -> bool:
-    lowered = task.lower()
-    has_project_subject = bool(
-        re.search(r"\b(project|repo|repository|codebase|workspace|application|app)\b", lowered)
-    )
+    lowered = normalize_task_text(task)
     has_summary_intent = any(
         term in lowered
         for term in (
@@ -48,14 +58,11 @@ def is_project_summary_task(task: str) -> bool:
             "describe",
         )
     )
-    return has_project_subject and has_summary_intent
+    return has_project_subject(lowered) and has_summary_intent
 
 
 def is_project_audit_task(task: str) -> bool:
-    lowered = task.lower()
-    has_project_subject = bool(
-        re.search(r"\b(project|repo|repository|codebase|workspace|application|app)\b", lowered)
-    )
+    lowered = normalize_task_text(task)
     has_audit_intent = any(
         term in lowered
         for term in (
@@ -82,9 +89,15 @@ def is_project_audit_task(task: str) -> bool:
             "assess",
             "find any",
             "identify",
+            "what must be done",
+            "what should be done",
+            "what to do next",
+            "next step",
+            "next steps",
+            "done next",
         )
     )
-    return has_project_subject and has_audit_intent
+    return has_project_subject(lowered) and has_audit_intent
 
 
 def is_code_editing_task(task: str) -> bool:
@@ -241,10 +254,25 @@ def looks_like_project_audit(output: str) -> bool:
             "recommendation:",
         )
     )
+    has_finding_structure = any(
+        term in lowered
+        for term in (
+            "project gap analysis",
+            "findings:",
+            "impact:",
+            "recommendation:",
+            "suggested verification:",
+        )
+    )
     has_evidence = "evidence:" in lowered or bool(
         re.search(r"\b[\w./-]+\.(py|ts|tsx|js|jsx|json|toml|md|css|yml|yaml)\b", output)
     )
-    return has_audit_language and has_evidence and not looks_like_file_inventory(output)
+    return (
+        has_audit_language
+        and has_finding_structure
+        and has_evidence
+        and not looks_like_file_inventory(output)
+    )
 
 
 def estimate_task_complexity(task: str) -> str:

@@ -4,7 +4,8 @@ import urllib.error
 from io import BytesIO
 from unittest.mock import patch
 
-from rlm_harness.model_client import LMClient, LMClientError
+from rlm_harness.model_client import LMClient, LMClientError, is_project_audit_prompt
+from rlm_harness.rlm.runtime import find_repl_blocks
 from rlm_harness.types import Msg
 
 
@@ -122,6 +123,46 @@ class LMClientTests(unittest.TestCase):
         self.assertEqual(payload["type"], "python")
         self.assertIn("project_audit()", payload["code"])
         self.assertIn("rlm.completion", payload["code"])
+
+    def test_stub_handles_project_typo_and_next_steps(self):
+        self.assertTrue(
+            is_project_audit_prompt("what is this porject about and what must be done next")
+        )
+        client = LMClient(provider="stub")
+
+        completion = client.complete(
+            [
+                Msg(
+                    role="user",
+                    content=(
+                        "Return only valid JSON for this action.\n"
+                        "Task: what is this porject about and what must be done next"
+                    ),
+                )
+            ]
+        )
+
+        payload = json.loads(completion.content)
+        self.assertIn("project_audit()", payload["code"])
+
+    def test_stub_rlm_fallback_generates_valid_python_for_multiline_context(self):
+        client = LMClient(provider="stub")
+        completion = client.complete(
+            [
+                Msg(
+                    role="user",
+                    content=(
+                        "Query:\n"
+                        "what is this porject about and what must be done next\n\n"
+                        "The context is available in the REPL as variable `context`."
+                    ),
+                )
+            ]
+        )
+
+        blocks = find_repl_blocks(completion.content)
+        self.assertEqual(len(blocks), 1)
+        compile(blocks[0], "<stub-rlm>", "exec")
 
 
 if __name__ == "__main__":

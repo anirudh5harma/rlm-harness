@@ -2,8 +2,20 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rlm_harness.evals.runner import EvalCase, EvalRunner, EvalSuite, UnitTestGrader
-from rlm_harness.evals.suite import EvalSuiteFileLoader
+from rlm_harness import cli
+from rlm_harness.evals.runner import (
+    EvalCase,
+    EvalReport,
+    EvalResult,
+    EvalRunner,
+    EvalSuite,
+    UnitTestGrader,
+    grade_output_expectations,
+)
+from rlm_harness.evals.suite import EvalSuiteFileLoader, read_suite_text
+from rlm_harness.memory import Memory
+from rlm_harness.memory.evolution import EvolutionProposalStore
+from rlm_harness.memory.profile import TasteProfileStore
 
 
 class EvalSystemTests(unittest.TestCase):
@@ -70,6 +82,152 @@ class EvalSystemTests(unittest.TestCase):
         self.assertEqual(suite.cases[0].id, "local-case")
         self.assertEqual(suite.cases[0].files["app.py"], "def add(a,b): return a-b\n")
         self.assertEqual(suite.cases[0].metadata["eval_type"], "suite")
+
+    def test_eval_runner_seeds_taste_and_grades_output_expectations(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            suite = EvalSuite(
+                name="taste",
+                cases=[
+                    EvalCase(
+                        id="concise-style",
+                        prompt="summarize",
+                        workspace=root / "case",
+                        grader=UnitTestGrader("python -c 'print(\"ok\")'"),
+                        taste_records=[
+                            {
+                                "scope": "user",
+                                "kind": "preference",
+                                "text": "Prefer compact summaries.",
+                            }
+                        ],
+                        evolution_proposals=[
+                            {
+                                "scope": "user",
+                                "kind": "prompt_rule",
+                                "title": "Compact summaries",
+                                "body": "Prefer compact summaries.",
+                                "rationale": "Seeded by taste regression.",
+                                "status": "approved",
+                            }
+                        ],
+                        output_contains=["compact"],
+                    )
+                ],
+            )
+            runner = EvalRunner(
+                harness_command=["python", "-c", "print('compact response')"],
+            )
+            report = runner.run(suite)
+
+            profile_db = root / "case" / ".rlm_harness" / "profile.db"
+            with Memory(profile_db) as memory:
+                taste_records = TasteProfileStore(memory).records()
+                proposals = EvolutionProposalStore(memory).proposals()
+
+        self.assertTrue(report.results[0].passed)
+        self.assertEqual(len(taste_records), 1)
+        self.assertEqual(len(proposals), 1)
+        self.assertIn("compact summaries", taste_records[0].text)
+
+    def test_eval_suite_file_loader_loads_taste_regression_fields_from_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            suite_path = Path(temp_dir) / "suite.json"
+            suite_path.write_text(
+                (
+                    '{"name":"taste","cases":[{"id":"style","prompt":"Summarize",'
+                    '"test_command":"python -c \\"print(1)\\"",'
+                    '"taste_records":[{"scope":"user","kind":"preference",'
+                    '"text":"Prefer direct answers."}],'
+                    '"evolution_proposals":[{"scope":"user","kind":"prompt_rule",'
+                    '"title":"Direct","body":"Prefer direct answers.",'
+                    '"rationale":"Seeded by eval.","status":"approved"}],'
+                    '"output_contains":["direct"],'
+                    '"output_not_contains":["verbose"]}]}'
+                ),
+                encoding="utf-8",
+            )
+            suite = EvalSuiteFileLoader().load_suite(suite_path, Path(temp_dir) / "work")
+
+        case = suite.cases[0]
+        self.assertEqual(case.taste_records[0]["text"], "Prefer direct answers.")
+        self.assertEqual(case.evolution_proposals[0]["title"], "Direct")
+        self.assertEqual(case.output_contains, ["direct"])
+        self.assertEqual(case.output_not_contains, ["verbose"])
+
+    def test_eval_suite_file_loader_loads_built_in_daily_driver_suite(self):
+        suite = EvalSuiteFileLoader().load_suite("daily-driver", Path("/tmp/work"))
+
+        self.assertEqual(suite.name, "daily-driver")
+        self.assertGreaterEqual(len(suite.cases), 3)
+        self.assertIn("fix-python-unittest", {case.id for case in suite.cases})
+        self.assertIn('"name": "daily-driver"', read_suite_text("daily-driver"))
+
+    def test_output_expectations_are_case_insensitive(self):
+        case = EvalCase(
+            id="style",
+            prompt="summarize",
+            workspace=Path("/tmp/work"),
+            grader=UnitTestGrader("python -c 'print(1)'"),
+            output_contains=["Verification"],
+            output_not_contains=["__RLM_FINAL_ANSWER__"],
+        )
+
+        grade = grade_output_expectations(case, "verification: ok", "")
+
+        self.assertTrue(grade.passed)
+
+    def test_eval_runner_fails_case_when_harness_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            suite = EvalSuite(
+                name="harness-error",
+                cases=[
+                    EvalCase(
+                        id="bad-run",
+                        prompt="run",
+                        workspace=Path(temp_dir) / "case",
+                        grader=UnitTestGrader("python -c 'print(\"ok\")'"),
+                    )
+                ],
+            )
+            runner = EvalRunner(
+                harness_command=["python", "-c", "import sys; sys.exit(7)"],
+            )
+            report = runner.run(suite)
+
+        self.assertFalse(report.results[0].passed)
+        self.assertEqual(report.results[0].status, "harness_error")
+        self.assertIn("harness exited with 7", report.results[0].output)
+
+    def test_eval_failure_proposals_are_recorded_for_review(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory_path = Path(temp_dir) / "memory.db"
+            report = EvalReport(
+                run_id="run",
+                suite="taste-regression",
+                results=[
+                    EvalResult(
+                        case_id="style",
+                        passed=False,
+                        score=0.0,
+                        status="harness_error",
+                        latency_ms=1,
+                        output="missing expected output",
+                        harness_stdout="",
+                        harness_stderr="",
+                        workspace=temp_dir,
+                        metadata={"prompt": "Summarize with learned style."},
+                    )
+                ],
+            )
+
+            recorded = cli.record_eval_failure_proposals(report, memory_path)
+            with Memory(memory_path) as memory:
+                proposals = EvolutionProposalStore(memory).proposals()
+
+        self.assertEqual(recorded, 1)
+        self.assertEqual(proposals[0].kind, "eval_case")
+        self.assertIn("taste-regression/style", proposals[0].body)
 
 
 if __name__ == "__main__":

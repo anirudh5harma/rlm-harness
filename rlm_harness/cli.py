@@ -10,7 +10,7 @@ import statistics
 import subprocess
 import sys
 import time
-from contextlib import nullcontext
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Optional
 
@@ -20,11 +20,13 @@ from rlm_harness.config import (
     default_base_url,
     default_memory_path,
     default_model,
+    default_profile_path,
     default_provider,
     default_trace_path,
     masked_secret,
     save_user_config,
 )
+from rlm_harness.dogfood import render_dogfood_report, run_dogfood
 from rlm_harness.evals.langsmith import (
     LangSmithExperimentUploader,
     LangSmithUploadConfig,
@@ -35,6 +37,14 @@ from rlm_harness.evals.suite import EvalSuiteFileLoader
 from rlm_harness.graph.build import build_graph
 from rlm_harness.graph.nodes import GraphRuntimeConfig, Nodes
 from rlm_harness.memory import Memory, MemoryError, MemoryPagingConfig
+from rlm_harness.memory.evolution import EvolutionProposal, EvolutionProposalManager
+from rlm_harness.memory.feedback import (
+    FeedbackRecord,
+    FeedbackStore,
+    infer_evolution_from_feedback,
+    infer_taste_from_feedback,
+)
+from rlm_harness.memory.profile import TasteProfileStore, TasteRecord
 from rlm_harness.model_client import LMClient, LMClientError
 from rlm_harness.model_server import MLXServer, MLXServerConfig, MLXServerError
 from rlm_harness.providers import (
@@ -45,6 +55,7 @@ from rlm_harness.providers import (
     provider_preset,
     static_models,
 )
+from rlm_harness.readiness import build_readiness_report, render_readiness_report
 from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, SandboxError
 from rlm_harness.tracing import TraceStore
 from rlm_harness.types import HarnessState, Msg
@@ -54,8 +65,13 @@ PUBLIC_COMMANDS = {
     "resume",
     "trace",
     "doctor",
+    "dogfood",
+    "evolve",
+    "feedback",
     "model",
     "provider",
+    "profile",
+    "readiness",
     "config",
     "eval",
     "update",
@@ -87,6 +103,7 @@ def build_runtime(
     args: argparse.Namespace,
     workspace: Path,
     memory: Optional[Memory],
+    profile_memory: Optional[Memory],
 ) -> GraphRuntimeConfig:
     return GraphRuntimeConfig(
         sandbox_enabled=not args.no_sandbox,
@@ -107,6 +124,7 @@ def build_runtime(
         max_iterations=args.max_iterations,
         act_engine=args.act_engine,
         memory=memory,
+        profile_memory=profile_memory,
         memory_paging=MemoryPagingConfig(
             max_history_tokens=args.max_history_tokens,
             preserve_recent_steps=args.preserve_recent_steps,
@@ -164,9 +182,18 @@ def run_task(
     )
 
     try:
-        memory_context = nullcontext(None) if args.no_memory else Memory(Path(args.memory_db))
-        with memory_context as memory:
-            runtime = build_runtime(args, workspace, memory)
+        with ExitStack() as stack:
+            memory = (
+                None
+                if args.no_memory
+                else stack.enter_context(Memory(Path(args.memory_db)))
+            )
+            profile_memory = (
+                None
+                if args.no_memory
+                else stack.enter_context(Memory(Path(args.profile_db)))
+            )
+            runtime = build_runtime(args, workspace, memory, profile_memory)
             graph = build_graph(
                 Nodes(build_client(args), traces, runtime),
                 backend=args.graph_backend,
@@ -306,12 +333,15 @@ def cmd_trace_events(args: argparse.Namespace) -> int:
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
+    profile_path = default_profile_path()
     checks = {
         "python": sys.version.split()[0],
         "harness_cli": shutil.which("harness") or "not installed as command yet",
         "docker_cli": "ok" if shutil.which("docker") else "missing",
         "langgraph": module_status("langgraph"),
+        "langgraph_checkpoint_sqlite": module_status("langgraph.checkpoint.sqlite"),
         "sqlite_vec": module_status("sqlite_vec"),
+        "profile_db": str(profile_path),
     }
     if shutil.which("docker"):
         completed = subprocess.run(
@@ -336,7 +366,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         for name, value in checks.items():
             print(f"{name}\t{value}")
     failing = {"missing", "unavailable"}
-    return 0 if all(value not in failing for value in checks.values()) else 1
+    required_checks = (
+        "docker_cli",
+        "langgraph",
+        "langgraph_checkpoint_sqlite",
+        "sqlite_vec",
+        "docker_daemon",
+        "sandbox_image",
+    )
+    return 0 if all(checks.get(name) not in failing for name in required_checks) else 1
 
 
 def module_status(module: str) -> str:
@@ -355,6 +393,7 @@ def current_config_payload() -> dict[str, str]:
         "base_url": default_base_url(),
         "api_key": masked_secret(default_api_key(provider)),
         "config_path": str(CONFIG_PATH),
+        "profile_path": str(default_profile_path()),
     }
 
 
@@ -365,6 +404,7 @@ def print_current_config() -> None:
     print(f"base_url\t{config['base_url']}")
     print(f"api_key\t{config['api_key']}")
     print(f"config\t{config['config_path']}")
+    print(f"profile\t{config['profile_path']}")
 
 
 def prompt_numbered_choice(options: list[str], prompt: str) -> Optional[str]:
@@ -397,6 +437,15 @@ def cmd_config(args: argparse.Namespace) -> int:
     else:
         print_current_config()
     return 0
+
+
+def cmd_readiness(args: argparse.Namespace) -> int:
+    report = build_readiness_report(Path.cwd(), check_docker=not args.no_docker)
+    if args.json_output:
+        print(report.to_json())
+    else:
+        print(render_readiness_report(report))
+    return 0 if report.status in {"ready", "degraded"} else 1
 
 
 def cmd_update(args: argparse.Namespace) -> int:
@@ -462,7 +511,7 @@ def cmd_update(args: argparse.Namespace) -> int:
 
     print("Upgrading package...")
     pip_result = subprocess.run(
-        [str(pip_bin), "install", "--upgrade", f"{src_dir}[graph]"],
+        [str(pip_bin), "install", "--upgrade", str(src_dir)],
         text=True,
         capture_output=True,
         check=False,
@@ -529,7 +578,7 @@ def _update_in_place(args: argparse.Namespace) -> int:
 
     print("Reinstalling package...")
     pip_result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-e", f"{repo_root}[dev,graph]"],
+        [sys.executable, "-m", "pip", "install", "-e", f"{repo_root}[dev]"],
         text=True,
         capture_output=True,
         check=False,
@@ -543,6 +592,13 @@ def _update_in_place(args: argparse.Namespace) -> int:
 
 
 def build_eval_harness_command(args: argparse.Namespace) -> list[str]:
+    return build_harness_run_command(args, no_sandbox=args.no_sandbox)
+
+
+def build_harness_run_command(
+    args: argparse.Namespace,
+    no_sandbox: bool = False,
+) -> list[str]:
     repo_root = Path(__file__).resolve().parents[1]
     bootstrap = (
         "import sys; "
@@ -551,7 +607,7 @@ def build_eval_harness_command(args: argparse.Namespace) -> list[str]:
         "raise SystemExit(main())"
     )
     command = [sys.executable, "-c", bootstrap, "run"]
-    if args.no_sandbox:
+    if no_sandbox:
         command.append("--no-sandbox")
     command.extend(["--provider", args.provider, "--model", args.model])
     if args.base_url:
@@ -572,6 +628,9 @@ def cmd_eval(args: argparse.Namespace) -> int:
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         Path(args.output).write_text(report.to_json(), encoding="utf-8")
+    recorded_failures = 0
+    if args.record_failures:
+        recorded_failures = record_eval_failure_proposals(report, Path(args.memory_db))
     if args.langsmith_upload or args.langsmith_required:
         config = LangSmithUploadConfig.from_env(
             dataset_name=args.langsmith_dataset,
@@ -598,9 +657,69 @@ def cmd_eval(args: argparse.Namespace) -> int:
         print(f"suite\t{report.suite}")
         print(f"run_id\t{report.run_id}")
         print(f"pass_rate\t{report.pass_rate:.3f}")
+        if args.record_failures:
+            print(f"failure_proposals\t{recorded_failures}")
         for result in report.results:
             print(f"{result.case_id}\t{result.status}\t{result.score:.1f}\t{result.latency_ms}ms")
     return 0 if all(result.passed for result in report.results) else 1
+
+
+def cmd_dogfood(args: argparse.Namespace) -> int:
+    readiness = build_readiness_report(Path.cwd(), check_docker=not args.no_docker)
+    report = run_dogfood(
+        readiness=readiness,
+        work_root=Path(args.work_root).resolve(),
+        sandbox_harness_command=build_harness_run_command(args, no_sandbox=False),
+        no_sandbox_harness_command=build_harness_run_command(args, no_sandbox=True),
+        timeout_s=args.eval_timeout,
+        no_docker=args.no_docker,
+        strict_readiness=args.strict_readiness,
+        install_smoke=args.install_smoke,
+        repo_root=Path(__file__).resolve().parents[1],
+    )
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(report.to_json(), encoding="utf-8")
+    if args.json_output:
+        print(report.to_json())
+    else:
+        print(render_dogfood_report(report))
+    return 0 if report.status == "passed" else 1
+
+
+def record_eval_failure_proposals(report, memory_path: Path) -> int:
+    failures = [result for result in report.results if not result.passed]
+    if not failures:
+        return 0
+    with Memory(memory_path) as memory:
+        store = EvolutionProposalManager(None, memory)
+        for result in failures:
+            prompt = str(result.metadata.get("prompt") or result.case_id)
+            store.add(
+                EvolutionProposal.create(
+                    scope="project",
+                    kind="eval_case",
+                    title=f"Improve failing eval: {result.case_id}",
+                    body=(
+                        f"Investigate eval `{report.suite}/{result.case_id}` and add "
+                        "a prompt, tool, or verification improvement so this case passes."
+                    ),
+                    rationale=(
+                        "Daily-driver quality requires repeated coding evals to pass. "
+                        f"Observed status `{result.status}` with score {result.score:.2f}."
+                    ),
+                    evidence={
+                        "suite": report.suite,
+                        "case_id": result.case_id,
+                        "prompt": prompt[:500],
+                        "status": result.status,
+                        "score": result.score,
+                        "output": result.output[:1000],
+                        "harness_stderr": result.harness_stderr[:1000],
+                    },
+                )
+            )
+    return len(failures)
 
 
 def cmd_model(args: argparse.Namespace) -> int:
@@ -877,6 +996,262 @@ def cmd_mem_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def open_profile(args: argparse.Namespace) -> Memory:
+    return Memory(Path(args.profile_db))
+
+
+def cmd_profile_list(args: argparse.Namespace) -> int:
+    try:
+        with open_profile(args) as memory:
+            records = TasteProfileStore(memory).records(
+                scope=args.scope,
+                status=args.status,
+                kind=args.kind,
+            )
+    except MemoryError as exc:
+        print(f"Profile command failed: {exc}", file=sys.stderr)
+        return 1
+    if args.json_output:
+        print(json.dumps([record.to_dict() for record in records], sort_keys=True))
+        return 0
+    if not records:
+        print("No taste records yet.")
+        return 0
+    for record in records:
+        print(
+            f"{record.id}\t{record.status}\t{record.scope}\t"
+            f"{record.kind}\t{record.confidence:.2f}\t{record.text}"
+        )
+    return 0
+
+
+def cmd_profile_learn(args: argparse.Namespace) -> int:
+    try:
+        with open_profile(args) as memory:
+            record = TasteProfileStore(memory).add(
+                TasteRecord.create(
+                    scope=args.scope,
+                    kind=args.kind,
+                    text=args.text,
+                    confidence=args.confidence,
+                    status="active" if args.active else "pending",
+                    evidence={"source": "cli"},
+                )
+            )
+    except MemoryError as exc:
+        print(f"Profile command failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"{record.status}\t{record.id}\t{record.text}")
+    return 0
+
+
+def cmd_profile_approve(args: argparse.Namespace) -> int:
+    try:
+        with open_profile(args) as memory:
+            record = TasteProfileStore(memory).approve(args.record_id)
+    except MemoryError as exc:
+        print(f"Profile command failed: {exc}", file=sys.stderr)
+        return 1
+    if record is None:
+        print(f"Unknown taste record: {args.record_id}", file=sys.stderr)
+        return 1
+    print(f"active\t{record.id}\t{record.text}")
+    return 0
+
+
+def cmd_profile_reject(args: argparse.Namespace) -> int:
+    try:
+        with open_profile(args) as memory:
+            record = TasteProfileStore(memory).reject(args.record_id)
+    except MemoryError as exc:
+        print(f"Profile command failed: {exc}", file=sys.stderr)
+        return 1
+    if record is None:
+        print(f"Unknown taste record: {args.record_id}", file=sys.stderr)
+        return 1
+    print(f"rejected\t{record.id}\t{record.text}")
+    return 0
+
+
+def cmd_evolve_list(args: argparse.Namespace) -> int:
+    try:
+        with ExitStack() as stack:
+            profile_memory = stack.enter_context(Memory(Path(args.profile_db)))
+            project_memory = stack.enter_context(Memory(Path(args.memory_db)))
+            manager = EvolutionProposalManager(profile_memory, project_memory)
+            proposals = manager.proposals(
+                scope=args.scope,
+                status=args.status,
+                kind=args.kind,
+            )
+    except MemoryError as exc:
+        print(f"Evolution command failed: {exc}", file=sys.stderr)
+        return 1
+    if args.json_output:
+        print(json.dumps([proposal.to_dict() for proposal in proposals], sort_keys=True))
+        return 0
+    if not proposals:
+        print("No evolution proposals yet.")
+        return 0
+    for proposal in proposals:
+        print(
+            f"{proposal.id}\t{proposal.status}\t{proposal.scope}\t"
+            f"{proposal.kind}\t{proposal.title}\t{proposal.body}"
+        )
+    return 0
+
+
+def cmd_evolve_propose(args: argparse.Namespace) -> int:
+    try:
+        with ExitStack() as stack:
+            profile_memory = stack.enter_context(Memory(Path(args.profile_db)))
+            project_memory = stack.enter_context(Memory(Path(args.memory_db)))
+            manager = EvolutionProposalManager(profile_memory, project_memory)
+            proposal = manager.add(
+                EvolutionProposal.create(
+                    scope=args.scope,
+                    kind=args.kind,
+                    title=args.title,
+                    body=args.body,
+                    rationale=args.rationale,
+                    status="approved" if args.approved else "pending",
+                    evidence={"source": "cli"},
+                )
+            )
+    except MemoryError as exc:
+        print(f"Evolution command failed: {exc}", file=sys.stderr)
+        return 1
+    if proposal is None:
+        print(f"No writable memory store for scope: {args.scope}", file=sys.stderr)
+        return 1
+    print(f"{proposal.status}\t{proposal.id}\t{proposal.title}")
+    return 0
+
+
+def cmd_evolve_approve(args: argparse.Namespace) -> int:
+    try:
+        with ExitStack() as stack:
+            profile_memory = stack.enter_context(Memory(Path(args.profile_db)))
+            project_memory = stack.enter_context(Memory(Path(args.memory_db)))
+            proposal = EvolutionProposalManager(
+                profile_memory,
+                project_memory,
+            ).approve(args.proposal_id)
+    except MemoryError as exc:
+        print(f"Evolution command failed: {exc}", file=sys.stderr)
+        return 1
+    if proposal is None:
+        print(f"Unknown evolution proposal: {args.proposal_id}", file=sys.stderr)
+        return 1
+    print(f"approved\t{proposal.id}\t{proposal.title}")
+    return 0
+
+
+def cmd_evolve_reject(args: argparse.Namespace) -> int:
+    try:
+        with ExitStack() as stack:
+            profile_memory = stack.enter_context(Memory(Path(args.profile_db)))
+            project_memory = stack.enter_context(Memory(Path(args.memory_db)))
+            proposal = EvolutionProposalManager(
+                profile_memory,
+                project_memory,
+            ).reject(args.proposal_id)
+    except MemoryError as exc:
+        print(f"Evolution command failed: {exc}", file=sys.stderr)
+        return 1
+    if proposal is None:
+        print(f"Unknown evolution proposal: {args.proposal_id}", file=sys.stderr)
+        return 1
+    print(f"rejected\t{proposal.id}\t{proposal.title}")
+    return 0
+
+
+def cmd_feedback_list(args: argparse.Namespace) -> int:
+    try:
+        with ExitStack() as stack:
+            profile_memory = stack.enter_context(Memory(Path(args.profile_db)))
+            project_memory = stack.enter_context(Memory(Path(args.memory_db)))
+            stores = [FeedbackStore(profile_memory), FeedbackStore(project_memory)]
+            records = []
+            for store in stores:
+                records.extend(store.records(scope=args.scope, rating=args.rating))
+            records.sort(key=lambda record: -record.created_at)
+    except MemoryError as exc:
+        print(f"Feedback command failed: {exc}", file=sys.stderr)
+        return 1
+    if args.json_output:
+        print(json.dumps([record.to_dict() for record in records], sort_keys=True))
+        return 0
+    if not records:
+        print("No feedback yet.")
+        return 0
+    for record in records:
+        run = record.run_id or "-"
+        print(f"{record.id}\t{record.rating}\t{record.scope}\t{run}\t{record.comment}")
+    return 0
+
+
+def cmd_feedback_add(args: argparse.Namespace) -> int:
+    evidence = {"source": "cli"}
+    thread_id = None
+    if args.run_id:
+        try:
+            summary = TraceStore(Path(args.trace_db)).run_summary(args.run_id)
+        except (KeyError, OSError) as exc:
+            print(f"Feedback command failed: {exc}", file=sys.stderr)
+            return 1
+        thread_id = str(summary.get("thread_id") or "")
+        evidence["run"] = {
+            "task": str(summary.get("task") or "")[:500],
+            "status": str(summary.get("status") or ""),
+            "final_answer": str(summary.get("final_answer") or "")[:1000],
+        }
+
+    try:
+        with ExitStack() as stack:
+            profile_memory = stack.enter_context(Memory(Path(args.profile_db)))
+            project_memory = stack.enter_context(Memory(Path(args.memory_db)))
+            feedback = FeedbackRecord.create(
+                scope=args.scope,
+                rating=args.rating,
+                comment=args.comment,
+                run_id=args.run_id,
+                thread_id=thread_id,
+                evidence=evidence,
+            )
+            feedback_store = FeedbackStore(
+                project_memory if feedback.scope == "project" else profile_memory
+            )
+            feedback = feedback_store.add(feedback)
+
+            taste_store = TasteProfileStore(
+                project_memory if feedback.scope == "project" else profile_memory
+            )
+            learned = [
+                taste_store.add(record)
+                for record in infer_taste_from_feedback(feedback, active=args.active)
+            ]
+
+            evolution = EvolutionProposalManager(profile_memory, project_memory)
+            proposals = [
+                proposal
+                for proposal in (
+                    evolution.add(proposal)
+                    for proposal in infer_evolution_from_feedback(feedback)
+                )
+                if proposal is not None
+            ]
+    except MemoryError as exc:
+        print(f"Feedback command failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"feedback\t{feedback.id}\t"
+        f"taste={len(learned)}\tproposals={len(proposals)}"
+    )
+    return 0
+
+
 def cmd_sandbox_build(args: argparse.Namespace) -> int:
     try:
         DockerREPL.build_image(
@@ -932,7 +1307,10 @@ def parser() -> argparse.ArgumentParser:
     )
     subparsers = root.add_subparsers(
         dest="command",
-        metavar="{run,resume,trace,doctor,model,provider,config,eval,update}",
+        metavar=(
+            "{run,resume,trace,doctor,dogfood,evolve,feedback,model,provider,profile,"
+            "readiness,config,eval,update}"
+        ),
         required=True,
     )
 
@@ -988,6 +1366,11 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument(
             "--memory-db",
             default=str(default_memory_path()),
+            help=argparse.SUPPRESS,
+        )
+        command.add_argument(
+            "--profile-db",
+            default=str(default_profile_path()),
             help=argparse.SUPPRESS,
         )
         command.add_argument("--no-memory", action="store_true", help=argparse.SUPPRESS)
@@ -1165,9 +1548,197 @@ def parser() -> argparse.ArgumentParser:
     )
     provider.set_defaults(func=cmd_provider)
 
+    profile = subparsers.add_parser("profile", help="Inspect or teach Harness taste.")
+    profile.add_argument(
+        "--profile-db",
+        default=str(default_profile_path()),
+        help=argparse.SUPPRESS,
+    )
+    profile_subparsers = profile.add_subparsers(dest="profile_command", required=False)
+
+    profile_list = profile_subparsers.add_parser("list")
+    profile_list.add_argument("--scope", choices=["user", "project"], default=None)
+    profile_list.add_argument(
+        "--status",
+        choices=["active", "pending", "rejected"],
+        default="active",
+    )
+    profile_list.add_argument("--kind", default=None)
+    profile_list.add_argument("--json", dest="json_output", action="store_true")
+    profile_list.set_defaults(func=cmd_profile_list)
+
+    profile_learn = profile_subparsers.add_parser("learn")
+    profile_learn.add_argument("text")
+    profile_learn.add_argument("--scope", choices=["user", "project"], default="user")
+    profile_learn.add_argument("--kind", default="preference")
+    profile_learn.add_argument("--confidence", type=float, default=0.9)
+    profile_learn.add_argument("--active", action="store_true")
+    profile_learn.set_defaults(func=cmd_profile_learn)
+
+    profile_approve = profile_subparsers.add_parser("approve")
+    profile_approve.add_argument("record_id")
+    profile_approve.set_defaults(func=cmd_profile_approve)
+
+    profile_reject = profile_subparsers.add_parser("reject")
+    profile_reject.add_argument("record_id")
+    profile_reject.set_defaults(func=cmd_profile_reject)
+    profile.set_defaults(
+        func=cmd_profile_list,
+        scope=None,
+        status="active",
+        kind=None,
+        json_output=False,
+    )
+
+    evolve = subparsers.add_parser(
+        "evolve",
+        help="Inspect and approve self-evolution proposals.",
+    )
+    evolve.add_argument(
+        "--profile-db",
+        default=str(default_profile_path()),
+        help=argparse.SUPPRESS,
+    )
+    evolve.add_argument(
+        "--memory-db",
+        default=str(default_memory_path()),
+        help=argparse.SUPPRESS,
+    )
+    evolve_subparsers = evolve.add_subparsers(dest="evolve_command", required=False)
+
+    evolve_list = evolve_subparsers.add_parser("list")
+    evolve_list.add_argument("--scope", choices=["user", "project"], default=None)
+    evolve_list.add_argument(
+        "--status",
+        choices=["pending", "approved", "rejected"],
+        default="pending",
+    )
+    evolve_list.add_argument(
+        "--kind",
+        choices=["prompt_rule", "verification_policy", "eval_case", "tooling"],
+        default=None,
+    )
+    evolve_list.add_argument("--json", dest="json_output", action="store_true")
+    evolve_list.set_defaults(func=cmd_evolve_list)
+
+    evolve_propose = evolve_subparsers.add_parser("propose")
+    evolve_propose.add_argument("--scope", choices=["user", "project"], default="user")
+    evolve_propose.add_argument(
+        "--kind",
+        choices=["prompt_rule", "verification_policy", "eval_case", "tooling"],
+        default="prompt_rule",
+    )
+    evolve_propose.add_argument("--title", required=True)
+    evolve_propose.add_argument("--body", required=True)
+    evolve_propose.add_argument("--rationale", required=True)
+    evolve_propose.add_argument("--approved", action="store_true")
+    evolve_propose.set_defaults(func=cmd_evolve_propose)
+
+    evolve_approve = evolve_subparsers.add_parser("approve")
+    evolve_approve.add_argument("proposal_id")
+    evolve_approve.set_defaults(func=cmd_evolve_approve)
+
+    evolve_reject = evolve_subparsers.add_parser("reject")
+    evolve_reject.add_argument("proposal_id")
+    evolve_reject.set_defaults(func=cmd_evolve_reject)
+    evolve.set_defaults(
+        func=cmd_evolve_list,
+        scope=None,
+        status="pending",
+        kind=None,
+        json_output=False,
+    )
+
+    feedback = subparsers.add_parser(
+        "feedback",
+        help="Record feedback so Harness can learn your taste.",
+    )
+    feedback.add_argument(
+        "--profile-db",
+        default=str(default_profile_path()),
+        help=argparse.SUPPRESS,
+    )
+    feedback.add_argument(
+        "--memory-db",
+        default=str(default_memory_path()),
+        help=argparse.SUPPRESS,
+    )
+    feedback.add_argument(
+        "--trace-db",
+        default=str(default_trace_path()),
+        help=argparse.SUPPRESS,
+    )
+    feedback_subparsers = feedback.add_subparsers(dest="feedback_command", required=False)
+
+    feedback_add = feedback_subparsers.add_parser("add")
+    feedback_add.add_argument("comment")
+    feedback_add.add_argument(
+        "--rating",
+        choices=["positive", "negative", "neutral", "good", "bad", "ok"],
+        default="neutral",
+    )
+    feedback_add.add_argument("--scope", choices=["user", "project"], default="user")
+    feedback_add.add_argument("--run-id", default=None)
+    feedback_add.add_argument("--active", action="store_true")
+    feedback_add.set_defaults(func=cmd_feedback_add)
+
+    feedback_list = feedback_subparsers.add_parser("list")
+    feedback_list.add_argument("--scope", choices=["user", "project"], default=None)
+    feedback_list.add_argument(
+        "--rating",
+        choices=["positive", "negative", "neutral"],
+        default=None,
+    )
+    feedback_list.add_argument("--json", dest="json_output", action="store_true")
+    feedback_list.set_defaults(func=cmd_feedback_list)
+    feedback.set_defaults(
+        func=cmd_feedback_list,
+        scope=None,
+        rating=None,
+        json_output=False,
+    )
+
     config_cmd = subparsers.add_parser("config", help="Show saved harness configuration.")
     config_cmd.add_argument("--json", dest="json_output", action="store_true")
     config_cmd.set_defaults(func=cmd_config)
+
+    readiness = subparsers.add_parser(
+        "readiness",
+        help="Check whether Harness is ready for daily coding work.",
+    )
+    readiness.add_argument("--json", dest="json_output", action="store_true")
+    readiness.add_argument(
+        "--no-docker",
+        action="store_true",
+        help="Skip Docker and sandbox checks.",
+    )
+    readiness.set_defaults(func=cmd_readiness)
+
+    dogfood = subparsers.add_parser(
+        "dogfood",
+        help="Run readiness, eval, and feedback proof checks.",
+    )
+    dogfood.add_argument("--work-root", default=".harness-evals/dogfood")
+    dogfood.add_argument("--output", default=None)
+    dogfood.add_argument("--eval-timeout", type=int, default=900)
+    dogfood.add_argument("--json", dest="json_output", action="store_true")
+    dogfood.add_argument(
+        "--no-docker",
+        action="store_true",
+        help="Skip Docker-dependent dogfood checks.",
+    )
+    dogfood.add_argument(
+        "--strict-readiness",
+        action="store_true",
+        help="Fail if readiness has setup blockers.",
+    )
+    dogfood.add_argument(
+        "--install-smoke",
+        action="store_true",
+        help="Install Harness into a fresh venv and run a bundled eval.",
+    )
+    add_model_args(dogfood, public=True)
+    dogfood.set_defaults(func=cmd_dogfood)
 
     update = subparsers.add_parser("update", help="Fetch latest harness from GitHub and upgrade.")
     update.add_argument(
@@ -1183,11 +1754,24 @@ def parser() -> argparse.ArgumentParser:
     update.set_defaults(func=cmd_update)
 
     eval_cmd = subparsers.add_parser("eval", help="Run harness evaluation suites.")
-    eval_cmd.add_argument("path", help="Path to a local YAML/JSON eval suite.")
+    eval_cmd.add_argument(
+        "path",
+        help="Path to a local YAML/JSON eval suite, or built-in: daily-driver, taste-regression.",
+    )
     eval_cmd.add_argument("--work-root", default=".harness-evals/work")
     eval_cmd.add_argument("--output", default=None)
     eval_cmd.add_argument("--eval-timeout", type=int, default=900)
     eval_cmd.add_argument("--json", dest="json_output", action="store_true")
+    eval_cmd.add_argument(
+        "--record-failures",
+        action="store_true",
+        help="Create pending evolution proposals for failing eval cases.",
+    )
+    eval_cmd.add_argument(
+        "--memory-db",
+        default=str(default_memory_path()),
+        help=argparse.SUPPRESS,
+    )
     eval_cmd.add_argument(
         "--langsmith-upload",
         action="store_true",
@@ -1327,7 +1911,8 @@ def interactive_loop() -> int:
             print("Tasks: type any natural-language coding task.")
             print(
                 "Slash commands: /provider [name] [--api-key key], /model [name], "
-                "/config, /doctor, /update, /quit"
+                "/profile, /evolve, /feedback, /readiness, /dogfood, /config, "
+                "/doctor, /update, /quit"
             )
             continue
         if task.startswith("/"):

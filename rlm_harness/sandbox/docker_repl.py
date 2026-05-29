@@ -107,6 +107,17 @@ class DockerREPL:
         if not workspace.exists():
             raise SandboxError(f"workspace does not exist: {workspace}")
 
+        command = self._run_command(workspace)
+        try:
+            self._start_process(command)
+        except SandboxError as exc:
+            if not self._is_missing_bind_source_error(str(exc)):
+                raise
+            self._warm_parent_mount(workspace)
+            self.container_name = f"rlm-harness-sandbox-{uuid.uuid4().hex[:12]}"
+            self._start_process(self._run_command(workspace))
+
+    def _run_command(self, workspace: Path) -> list[str]:
         command = [
             "docker",
             "run",
@@ -139,6 +150,9 @@ class DockerREPL:
         if self.config.tmpfs:
             command.insert(-1, "--tmpfs")
             command.insert(-1, self.config.tmpfs)
+        return command
+
+    def _start_process(self, command: list[str]) -> None:
         try:
             self._process = subprocess.Popen(
                 command,
@@ -153,6 +167,50 @@ class DockerREPL:
                 "docker CLI not found; install Docker or run with --no-sandbox"
             ) from exc
         self._ensure_started()
+
+    @staticmethod
+    def _is_missing_bind_source_error(message: str) -> bool:
+        return (
+            'invalid mount config for type "bind"' in message
+            and "bind source path does not exist" in message
+        )
+
+    def _warm_parent_mount(self, workspace: Path) -> None:
+        """Prime Docker Desktop's file-sharing view for freshly-created deep paths."""
+        for ancestor in workspace.parents:
+            try:
+                relative = workspace.relative_to(ancestor)
+            except ValueError:
+                continue
+            script = (
+                "from pathlib import Path\n"
+                "import sys\n"
+                f"target = Path('/workspace') / {str(relative)!r}\n"
+                "sys.exit(0 if target.exists() else 1)\n"
+            )
+            try:
+                completed = subprocess.run(
+                    [
+                        "docker",
+                        "run",
+                        "--rm",
+                        "--mount",
+                        f"type=bind,src={ancestor},dst=/workspace",
+                        "--entrypoint",
+                        "python",
+                        self.config.image,
+                        "-c",
+                        script,
+                    ],
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                return
+            if completed.returncode == 0:
+                return
 
     def execute(self, code: str, timeout_s: Optional[float] = None) -> ExecutionResult:
         self.start()
@@ -220,13 +278,16 @@ class DockerREPL:
 
     def _ensure_started(self) -> None:
         deadline = time.monotonic() + self.config.start_timeout_s
+        stable_after = min(deadline, time.monotonic() + 0.2)
         while time.monotonic() < deadline:
             if self._process is None:
                 raise SandboxError("sandbox process did not start")
             if self._process.poll() is not None:
                 stderr = self._process.stderr.read() if self._process.stderr else ""
                 raise SandboxError(f"sandbox container exited during startup: {stderr}")
-            return
+            if time.monotonic() >= stable_after:
+                return
+            time.sleep(0.02)
         raise SandboxError("sandbox did not start before timeout")
 
     def _read_execute_result(self, request_id: str, timeout_s: float) -> str:

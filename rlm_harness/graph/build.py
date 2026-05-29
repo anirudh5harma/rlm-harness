@@ -27,6 +27,8 @@ class HarnessGraph:
                 return state
             state = self.nodes.act(state)
             state = self.nodes.memory_write(state)
+            if state.status == "done":
+                return self.nodes.learn(self.nodes.done(state))
             state = self.nodes.execute_action(state)
             state = self.nodes.memory_write(state)
             state = self.nodes.verify(state)
@@ -36,13 +38,13 @@ class HarnessGraph:
             state = self.nodes.reflect(state)
             state = self.nodes.memory_write(state)
             if state.status == "done":
-                return self.nodes.done(state)
+                return self.nodes.learn(self.nodes.done(state))
             if state.status in {"error", "stopped"}:
-                return state
+                return self.nodes.learn(state)
         state.status = "stopped"
         if state.final_answer is None:
             state.final_answer = "Stopped before the task reached a completed state."
-        return state
+        return self.nodes.learn(state)
 
 
 class LangGraphHarnessGraph:
@@ -99,13 +101,18 @@ def _build_langgraph(nodes: Nodes, checkpoint_path: Optional[Path] = None):
     graph.add_node("observe", nodes.observe)
     graph.add_node("reflect", nodes.reflect)
     graph.add_node("done", nodes.done)
+    graph.add_node("learn", nodes.learn)
 
     graph.set_entry_point("memory_read")
     graph.add_edge("memory_read", "plan")
     graph.add_edge("plan", "memory_after_plan")
     graph.add_edge("memory_after_plan", "act")
     graph.add_edge("act", "memory_after_act")
-    graph.add_edge("memory_after_act", "execute_action")
+    graph.add_conditional_edges(
+        "memory_after_act",
+        lambda state: "done" if state.status == "done" else "execute_action",
+        {"done": "done", "execute_action": "execute_action"},
+    )
     graph.add_edge("execute_action", "memory_after_execute")
     graph.add_conditional_edges(
         "memory_after_execute",
@@ -114,14 +121,16 @@ def _build_langgraph(nodes: Nodes, checkpoint_path: Optional[Path] = None):
     )
     graph.add_edge("verify", "memory_after_verify")
     graph.add_edge("memory_after_verify", "observe")
+    graph.add_edge("observe", "memory_after_observe")
     graph.add_edge("memory_after_observe", "reflect")
     graph.add_edge("reflect", "memory_after_reflect")
     graph.add_conditional_edges(
         "memory_after_reflect",
         lambda state: state.status if state.status in {"done", "error", "stopped"} else "act",
-        {"done": "done", "error": END, "stopped": END, "act": "act"},
+        {"done": "done", "error": "learn", "stopped": "learn", "act": "act"},
     )
-    graph.add_edge("done", END)
+    graph.add_edge("done", "learn")
+    graph.add_edge("learn", END)
     return LangGraphHarnessGraph(graph.compile(checkpointer=checkpointer), connection)
 
 

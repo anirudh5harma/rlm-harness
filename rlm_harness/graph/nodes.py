@@ -12,8 +12,8 @@ from rlm_harness.graph.planning import (
     parse_structured_plan,
 )
 from rlm_harness.graph.recovery import (
-    ErrorClassifier,
     ErrorCategory,
+    ErrorClassifier,
     RecoverySelector,
     RecoveryStrategy,
     is_retryable_decision,
@@ -32,7 +32,9 @@ from rlm_harness.graph.task_policy import (
 )
 from rlm_harness.graph.verification import VerificationGate, VerificationResult
 from rlm_harness.memory import Memory
+from rlm_harness.memory.evolution import EvolutionProposalManager
 from rlm_harness.memory.paging import MemoryPager, MemoryPagingConfig
+from rlm_harness.memory.profile import TasteProfileManager
 from rlm_harness.model_client import LMClient
 from rlm_harness.observability import maybe_traceable
 from rlm_harness.rlm import RLMRuntime
@@ -44,7 +46,7 @@ from rlm_harness.sandbox.tools import (
     render_project_overview_summary,
 )
 from rlm_harness.tracing import TraceStore
-from rlm_harness.types import HarnessState, Msg, PlanStepStatus, TaskPlan
+from rlm_harness.types import HarnessState, Msg, PlanStep, PlanStepStatus, TaskPlan
 
 
 class ActionParseError(ValueError):
@@ -60,6 +62,7 @@ class GraphRuntimeConfig:
     max_iterations: int = 6
     act_engine: str = "rlm"
     memory: Optional[Memory] = None
+    profile_memory: Optional[Memory] = None
     memory_paging: MemoryPagingConfig = MemoryPagingConfig()
 
 
@@ -127,10 +130,25 @@ def observation_user_output(payload: dict) -> str:
     stdout = payload.get("stdout")
     stderr = payload.get("stderr")
     if isinstance(stdout, str) and stdout.strip():
-        parts.append(stdout.strip())
+        parts.append(strip_completion_markers(stdout).strip())
     if isinstance(stderr, str) and stderr.strip():
         parts.append(stderr.strip())
     return "\n".join(parts).strip()
+
+
+def strip_completion_markers(output: str) -> str:
+    marker = "__RLM_FINAL_ANSWER__"
+    lines = []
+    for line in output.splitlines():
+        if not line.startswith(marker):
+            lines.append(line)
+            continue
+        payload = line[len(marker) :]
+        try:
+            lines.append(str(json.loads(payload.strip())))
+        except json.JSONDecodeError:
+            lines.append(payload)
+    return "\n".join(line for line in lines if line.strip())
 
 
 def is_retryable_observation(status: Optional[str]) -> bool:
@@ -155,6 +173,16 @@ class Nodes:
                 self.runtime.memory_paging,
             )
             if self.runtime.memory is not None
+            else None
+        )
+        self.taste_profile = (
+            TasteProfileManager(self.runtime.profile_memory, self.runtime.memory)
+            if self.runtime.profile_memory is not None or self.runtime.memory is not None
+            else None
+        )
+        self.evolution = (
+            EvolutionProposalManager(self.runtime.profile_memory, self.runtime.memory)
+            if self.runtime.profile_memory is not None or self.runtime.memory is not None
             else None
         )
 
@@ -195,16 +223,18 @@ class Nodes:
                     "Use sub-numbering for multi-part steps (e.g., 1, 2a, 2b, 3). "
                     f"The task appears to be {complexity} complexity. "
                     f"Do not use tools yet.\n\nTask: {state.task}"
-                    f"{memory_context}"
+                    f"{memory_context}{self._taste_context(state)}"
                 ),
             ),
         ]
         try:
             completion = self.client.complete(messages, max_tokens=600, temperature=0.1)
         except Exception as exc:
-            from rlm_harness.types import PlanStep
-            state.plan = TaskPlan(steps=[PlanStep(id="1", description="Respond to the task")], current_step_id="1")
-            state.history.append({"node": "plan", "content": f"plan: Respond to the task"})
+            state.plan = TaskPlan(
+                steps=[PlanStep(id="1", description="Respond to the task")],
+                current_step_id="1",
+            )
+            state.history.append({"node": "plan", "content": "plan: Respond to the task"})
             self.traces.event(
                 state.run_id,
                 "plan_error",
@@ -261,14 +291,17 @@ class Nodes:
                 role="user",
                 content=(
                     f"Task: {state.task}\nPlan progress:\n{plan_text}"
-                    f"{self._memory_context(state)}{self._recovery_context(state)}"
+                    f"{self._memory_context(state)}"
+                    f"{self._taste_context(state)}{self._recovery_context(state)}"
                 ),
             ),
         ]
         try:
             completion = self.client.complete(messages, max_tokens=700, temperature=0.2)
         except Exception as exc:
-            state.scratch["last_action"] = json.dumps({"status": "error", "stderr": f"LLM: {type(exc).__name__}: {exc}"})
+            state.scratch["last_action"] = json.dumps(
+                {"status": "error", "stderr": f"LLM: {type(exc).__name__}: {exc}"}
+            )
             state.history.append({"node": "act", "content": f"model error: {exc}"})
             self.traces.event(
                 state.run_id,
@@ -279,6 +312,8 @@ class Nodes:
             return state
         state.scratch["last_action"] = completion.content
         state.history.append({"node": "act", "content": completion.content})
+        state.final_answer = completion.content.strip()
+        state.status = "done"
         self.traces.event(
             state.run_id,
             "model_completion",
@@ -301,23 +336,33 @@ class Nodes:
                 self.client,
                 workspace=Path(state.workspace),
                 max_iterations=self.runtime.max_iterations,
-                max_depth=(self.runtime.subcall_config.max_depth if self.runtime.subcall_config else 3),
+                max_depth=(
+                    self.runtime.subcall_config.max_depth
+                    if self.runtime.subcall_config
+                    else 3
+                ),
                 sandbox_enabled=True,
                 sandbox_config=sandbox_config,
                 subcall_config=self.runtime.subcall_config,
             )
             context = rlm_action_context(state, sandbox_config.mount_path)
             result = runtime.completion(state.task, context=context)
+            raw_final_answer = result.final_answer
             final_answer = fallback_project_answer_if_needed(
                 state.task,
-                result.final_answer,
+                raw_final_answer,
                 Path(state.workspace),
                 result.status,
             )
+            action_completed = result.status == "done" or (
+                final_answer != raw_final_answer and bool(final_answer.strip())
+            )
+            stderr = "\n".join(obs.stderr for obs in result.observations if obs.stderr)
             observation = {
-                "status": "ok" if final_answer else result.status,
-                "stdout": final_answer or result.final_answer,
-                "stderr": "\n".join(obs.stderr for obs in result.observations if obs.stderr),
+                "status": "ok" if action_completed else result.status,
+                "rlm_status": result.status,
+                "stdout": final_answer or raw_final_answer,
+                "stderr": "" if action_completed else stderr,
                 "timed_out": any(obs.timed_out for obs in result.observations),
                 "elapsed_ms": sum(obs.elapsed_ms for obs in result.observations),
                 "subcalls": result.subcalls,
@@ -325,6 +370,7 @@ class Nodes:
                 "iterations": result.iterations,
                 "engine": "rlm",
             }
+            state.scratch["action_completed"] = action_completed
         except SandboxError as exc:
             observation = {
                 "status": "sandbox_error",
@@ -545,6 +591,10 @@ class Nodes:
                     "user-facing answer to stdout. For code-editing tasks, make the change, "
                     "run focused verification when possible, and print the changed files and "
                     "verification result. "
+                    "For risky edits, dependency changes, prompt/policy changes, or changes "
+                    "outside the user's apparent request, use propose_file_change() and show "
+                    "the pending diff instead of applying silently. Destructive shell commands "
+                    "are blocked unless the user has explicitly approved them. "
                     "Use the provided Python tool functions to inspect or manipulate "
                     "the workspace: "
                     f"{render_tool_list()}. "
@@ -560,6 +610,7 @@ class Nodes:
                     f"{step_guidance}{progress}\nBudget: {budget_status}"
                     f"{self._recent_history_context(state)}"
                     f"{self._memory_context(state)}"
+                    f"{self._taste_context(state)}"
                     f"{self._recovery_context(state)}{retry}"
                 ),
             ),
@@ -594,6 +645,26 @@ class Nodes:
             state.plan.current_step_id = current_step.id
 
         if observation_payload:
+            if (
+                state.scratch.get("action_completed")
+                and is_code_editing_task(state.task)
+                and observation_payload.get("status") == "ok"
+                and self._check_verification_result(state)
+                and not observation_user_output(observation_payload)
+            ):
+                self.traces.event(
+                    state.run_id,
+                    "reflection",
+                    {
+                        "decision": "done",
+                        "content": (
+                            "RLM runtime signaled completion with passing verification"
+                        ),
+                    },
+                    node="reflect",
+                )
+                state.scratch.pop("action_completed", None)
+                return self.done(state)
             recovery_reason = self._check_output_quality(
                 state, observation_payload, last_observation
             )
@@ -610,7 +681,10 @@ class Nodes:
                 (observation_payload.get("stderr", "") if observation_payload else ""),
                 bool(observation_payload and observation_payload.get("timed_out", False)),
             )
-            if category != ErrorCategory.UNKNOWN or observation_status == "error":
+            if (
+                category != ErrorCategory.UNKNOWN
+                or observation_status in {"error", "stopped"}
+            ):
                 self._apply_recovery(
                     state,
                     category,
@@ -634,6 +708,25 @@ class Nodes:
 
         if observation_payload and observation_payload.get("status") == "ok":
             verification_passed = self._check_verification_result(state)
+            if state.scratch.pop("action_completed", False):
+                if verification_passed:
+                    self.traces.event(
+                        state.run_id,
+                        "reflection",
+                        {
+                            "decision": "done",
+                            "content": "RLM runtime signaled task completion",
+                        },
+                        node="reflect",
+                    )
+                    return self.done(state)
+                self._apply_recovery(
+                    state,
+                    ErrorCategory.VERIFICATION_FAILURE,
+                    current_step,
+                    "verification failed after RLM runtime signaled completion",
+                )
+                return state
             if current_step and verification_passed:
                 advance_to_next_step(state.plan)
                 if not state.plan.has_more():
@@ -653,6 +746,7 @@ class Nodes:
                     f"Budget: {state.budget.progress_summary}\n"
                     f"Last observation: {last_observation}"
                     f"{self._memory_context(state)}"
+                    f"{self._taste_context(state)}"
                 ),
             ),
         ]
@@ -702,15 +796,6 @@ class Nodes:
         if observation_payload.get("status") != "ok":
             return ""
 
-        if is_project_summary_task(state.task):
-            user_output = observation_user_output(observation_payload)
-            if user_output and (
-                looks_like_file_inventory(user_output)
-                or looks_like_source_dump(user_output)
-                or not looks_like_project_summary(user_output)
-            ):
-                return "project-summary task did not produce a project summary"
-
         if is_project_audit_task(state.task):
             user_output = observation_user_output(observation_payload)
             if user_output and (
@@ -719,6 +804,16 @@ class Nodes:
                 or not looks_like_project_audit(user_output)
             ):
                 return "project-audit task did not produce evidence-backed findings"
+            return ""
+
+        if is_project_summary_task(state.task):
+            user_output = observation_user_output(observation_payload)
+            if user_output and (
+                looks_like_file_inventory(user_output)
+                or looks_like_source_dump(user_output)
+                or not looks_like_project_summary(user_output)
+            ):
+                return "project-summary task did not produce a project summary"
 
         if not observation_user_output(observation_payload) and (
             is_informational_task(state.task) or is_code_editing_task(state.task)
@@ -746,7 +841,7 @@ class Nodes:
         self,
         state: HarnessState,
         category: ErrorCategory,
-        step: Optional["PlanStep"],
+        step: Optional[PlanStep],
         reason: str,
     ) -> None:
         attempt = int(state.scratch.get("graph_iterations", 0))
@@ -872,7 +967,12 @@ class Nodes:
         state.scratch["verification_result"] = {
             "passed": result.passed,
             "checks": [
-                {"check_type": c.check_type, "passed": c.passed, "output": c.output}
+                {
+                    "check_type": c.check_type,
+                    "passed": c.passed,
+                    "output": c.output,
+                    "command": c.command,
+                }
                 for c in result.checks
             ],
             "changed_files": result.changed_files,
@@ -920,7 +1020,8 @@ class Nodes:
             completion = self.client.complete(messages, max_tokens=300, temperature=0.1)
         except Exception as exc:
             state.final_answer = (
-                f"Budget exhausted after completing {len(completed)}/{len(completed) + len(pending)} steps. "
+                "Budget exhausted after completing "
+                f"{len(completed)}/{len(completed) + len(pending)} steps. "
                 f"Partial results: {'; '.join(completed_desc[:5])}"
             )
             state.status = "stopped"
@@ -963,13 +1064,76 @@ class Nodes:
 
     def memory_read(self, state: HarnessState) -> HarnessState:
         if self.memory is None:
-            return state
-        return self.memory.hydrate(state)
+            return self.taste_read(state)
+        state = self.memory.hydrate(state)
+        return self.taste_read(state)
 
     def memory_write(self, state: HarnessState) -> HarnessState:
         if self.memory is None:
             return state
         return self.memory.persist_new_history(state)
+
+    def taste_read(self, state: HarnessState) -> HarnessState:
+        if self.taste_profile is None or state.scratch.get("taste_hydrated"):
+            return state
+        context_parts = [self.taste_profile.render_context()]
+        if self.evolution is not None:
+            context_parts.append(self.evolution.render_context())
+        context = "\n\n".join(part for part in context_parts if part.strip())
+        state.scratch["taste_hydrated"] = True
+        state.scratch["taste_context"] = context
+        self.traces.event(
+            state.run_id,
+            "taste_hydrated",
+            {"context_present": bool(context.strip())},
+            node="taste",
+        )
+        return state
+
+    def learn(self, state: HarnessState) -> HarnessState:
+        if self.taste_profile is None:
+            return state
+        learned = self.taste_profile.learn_from_state(state)
+        proposals = (
+            self.evolution.propose_from_state(state, learned)
+            if self.evolution is not None
+            else []
+        )
+        state.scratch["taste_learned_count"] = len(learned)
+        state.scratch["evolution_proposal_count"] = len(proposals)
+        if learned:
+            state.history.append(
+                {
+                    "node": "learn",
+                    "content": "; ".join(record.text for record in learned),
+                }
+            )
+        if proposals:
+            state.history.append(
+                {
+                    "node": "learn",
+                    "content": "; ".join(proposal.title for proposal in proposals),
+                }
+            )
+        self.traces.event(
+            state.run_id,
+            "taste_learned",
+            {
+                "count": len(learned),
+                "records": [record.to_dict() for record in learned],
+            },
+            node="taste",
+        )
+        self.traces.event(
+            state.run_id,
+            "evolution_proposed",
+            {
+                "count": len(proposals),
+                "proposals": [proposal.to_dict() for proposal in proposals],
+            },
+            node="taste",
+        )
+        return state
 
     @staticmethod
     def _memory_context(state: HarnessState) -> str:
@@ -977,6 +1141,13 @@ class Nodes:
         if not isinstance(context, str) or not context.strip():
             return ""
         return f"\n\nMemory context:\n{context}"
+
+    @staticmethod
+    def _taste_context(state: HarnessState) -> str:
+        context = state.scratch.get("taste_context", "")
+        if not isinstance(context, str) or not context.strip():
+            return ""
+        return f"\n\nTaste context:\n{context}"
 
     @staticmethod
     def _recovery_context(state: HarnessState) -> str:
@@ -1002,9 +1173,13 @@ class Nodes:
     @maybe_traceable("Harness.done", run_type="chain")
     def done(self, state: HarnessState) -> HarnessState:
         state.status = "done"
-        state.final_answer = final_answer_from_action(
-            state.scratch.get("last_action", ""),
+        last_action = state.scratch.get("last_action", "")
+        if not last_action and state.history:
+            last_action = state.history[-1].get("content", "")
+        state.final_answer = build_final_answer(
+            last_action,
             task=state.task,
+            verification=state.scratch.get("verification_result"),
         )
         self.traces.event(
             state.run_id,
@@ -1013,6 +1188,49 @@ class Nodes:
             node="done",
         )
         return state
+
+
+def build_final_answer(
+    action: str,
+    task: str = "",
+    verification: object = None,
+) -> str:
+    answer = final_answer_from_action(action, task=task)
+    if not is_code_editing_task(task):
+        return answer
+
+    if not looks_like_code_edit_result(answer) or looks_like_source_dump(answer):
+        answer = "Completed the requested code change."
+
+    verification_summary = verification_result_summary(verification)
+    if verification_summary and "verification" not in answer.lower():
+        answer = f"{answer.rstrip()}\n\nVerification:\n{verification_summary}"
+    return answer
+
+
+def verification_result_summary(verification: object) -> str:
+    if isinstance(verification, VerificationResult):
+        return verification.summary.strip()
+    if not isinstance(verification, dict):
+        return ""
+    summary = str(verification.get("summary") or "").strip()
+    if summary:
+        return summary
+    checks = verification.get("checks")
+    if not isinstance(checks, list):
+        return ""
+    lines = []
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        state = "PASS" if check.get("passed") else "FAIL"
+        check_type = str(check.get("check_type") or "check")
+        output = str(check.get("output") or "").strip()
+        line = f"[{state}] {check_type}"
+        if output:
+            line += f": {output[:500]}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def parse_observation_status(observation: str) -> Optional[str]:
@@ -1037,7 +1255,6 @@ def _find_or_create_default_step(state: HarnessState) -> PlanStep:
     for step in state.plan.steps:
         if step.status in (PlanStepStatus.PENDING, PlanStepStatus.IN_PROGRESS):
             return step
-    from rlm_harness.types import PlanStep
 
     step = PlanStep(id="1", description="complete the task")
     state.plan.steps.append(step)
@@ -1101,6 +1318,7 @@ def rlm_action_context(state: HarnessState, mount_path: str = "/workspace") -> d
         "plan_context": format_plan_context(state.plan),
         "recent_history": state.history[-4:],
         "memory_context": state.scratch.get("memory_context", ""),
+        "taste_context": state.scratch.get("taste_context", ""),
         "workspace": mount_path,
         "workspace_note": (
             "Code runs inside Docker. Use workspace-relative tool paths or "
@@ -1115,12 +1333,14 @@ def fallback_project_answer_if_needed(
     workspace: Path,
     status: str,
 ) -> str:
+    if is_project_audit_task(task):
+        if status != "done" or not looks_like_project_audit(answer):
+            return workspace_project_audit(workspace)
+        return answer
     if is_project_summary_task(task) and (
         status != "done" or not looks_like_project_summary_answer(answer)
     ):
         return workspace_project_summary(workspace)
-    if is_project_audit_task(task) and (status != "done" or not looks_like_project_audit(answer)):
-        return workspace_project_audit(workspace)
     return answer
 
 
