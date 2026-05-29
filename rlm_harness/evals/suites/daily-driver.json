@@ -73,6 +73,75 @@
         "Notable source files",
         "Working tree:"
       ]
+    },
+    {
+      "id": "slash-palette-cli",
+      "prompt": "Show the slash palette.",
+      "harness_args": [
+        "/"
+      ],
+      "test_command": "python -c \"print('workspace ok')\"",
+      "output_contains": [
+        "Harness slash palette",
+        "/mcp list|setup|add|show|tools|trust|enable",
+        "/taste list|context|learn|scan|approve|reject",
+        "mcp_call_tool"
+      ],
+      "output_not_contains": [
+        "Traceback",
+        "usage: rlm-harness"
+      ]
+    },
+    {
+      "id": "taste-context-cli",
+      "prompt": "Show the taste context.",
+      "harness_args": [
+        "taste",
+        "--profile-db",
+        "{profile_db}",
+        "--memory-db",
+        "{memory_db}",
+        "context"
+      ],
+      "test_command": "python -c \"print('workspace ok')\"",
+      "taste_records": [
+        {
+          "scope": "user",
+          "kind": "preference",
+          "text": "Prefer concise final answers.",
+          "confidence": 0.95,
+          "status": "active"
+        },
+        {
+          "scope": "project",
+          "kind": "verification_command",
+          "text": "Run `pytest` for Python test verification.",
+          "confidence": 0.9,
+          "status": "active"
+        }
+      ],
+      "evolution_proposals": [
+        {
+          "scope": "user",
+          "kind": "prompt_rule",
+          "title": "Concise final answers",
+          "body": "Keep final answers concise unless asked for detail.",
+          "rationale": "Seeded by the daily-driver eval suite.",
+          "status": "approved"
+        }
+      ],
+      "output_contains": [
+        "Taste context:",
+        "User taste:",
+        "Prefer concise final answers.",
+        "Project conventions:",
+        "Run `pytest` for Python test verification.",
+        "Approved user evolution:"
+      ],
+      "output_not_contains": [
+        "No active taste context yet.",
+        "Traceback"
+      ]
     }
   ]
 }

@@ -57,12 +57,14 @@ from rlm_harness.kernel import (
     PlanCreatedEvent,
     VerificationEvent,
 )
+from rlm_harness.mcp_config import MCPConfigStore
 from rlm_harness.memory import Memory
 from rlm_harness.memory.evolution import EvolutionProposalManager
 from rlm_harness.memory.paging import MemoryPager, MemoryPagingConfig
-from rlm_harness.memory.profile import TasteProfileManager
+from rlm_harness.memory.profile import TasteProfileManager, TasteProfileStore
 from rlm_harness.model_client import LMClient
 from rlm_harness.observability import maybe_traceable
+from rlm_harness.project_style import scan_project_style
 from rlm_harness.rlm import RLMRuntime
 from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, SandboxError
 from rlm_harness.sandbox import tools as sandbox_tools
@@ -88,6 +90,10 @@ class GraphRuntimeConfig:
     memory: Optional[Memory] = None
     profile_memory: Optional[Memory] = None
     memory_paging: MemoryPagingConfig = MemoryPagingConfig()
+    mcp_context: str = ""
+    mcp_config_path: Optional[Path] = None
+    auto_style_scan: bool = True
+    style_scan_max_files: int = 400
 
 
 def parse_numbered_plan(text: str) -> TaskPlan:
@@ -216,6 +222,7 @@ class Nodes:
                     f"The task appears to be {complexity} complexity. "
                     f"Do not use tools yet.\n\nTask: {state.task}"
                     f"{memory_context}{self._taste_context(state)}"
+                    f"{self._mcp_context()}"
                 ),
             ),
         ]
@@ -274,11 +281,11 @@ class Nodes:
 
     @maybe_traceable("Harness.act", run_type="chain")
     def act(self, state: HarnessState) -> HarnessState:
+        if self.runtime.act_engine == "tool":
+            return self._select_tool_action(state)
         if self.runtime.sandbox_enabled:
             if self.runtime.act_engine == "rlm":
                 return self._run_rlm_action(state)
-            if self.runtime.act_engine == "tool":
-                return self._select_tool_action(state)
             return self._select_sandbox_action(state)
 
         plan_text = format_plan_context(state.plan)
@@ -599,6 +606,7 @@ class Nodes:
             observation = ToolExecutor(
                 Path(state.workspace),
                 autonomy=self.runtime.autonomy,
+                mcp_store=MCPConfigStore(self.runtime.mcp_config_path),
             ).execute(action)
             rendered = render_typed_observation(observation)
             state.scratch["last_action"] = rendered
@@ -771,6 +779,7 @@ class Nodes:
                     f"{self._recent_history_context(state)}"
                     f"{self._memory_context(state)}"
                     f"{self._taste_context(state)}"
+                    f"{self._mcp_context()}"
                     f"{self._recovery_context(state)}{retry}"
                 ),
             ),
@@ -813,6 +822,7 @@ class Nodes:
                     f"{self._recent_history_context(state)}"
                     f"{self._memory_context(state)}"
                     f"{self._taste_context(state)}"
+                    f"{self._mcp_context()}"
                     f"{self._recovery_context(state)}{retry}"
                 ),
             ),
@@ -1307,6 +1317,7 @@ class Nodes:
     def taste_read(self, state: HarnessState) -> HarnessState:
         if self.taste_profile is None or state.scratch.get("taste_hydrated"):
             return state
+        self._bootstrap_project_style(state)
         context_parts = [self.taste_profile.render_context()]
         if self.evolution is not None:
             context_parts.append(self.evolution.render_context())
@@ -1320,6 +1331,33 @@ class Nodes:
             node="taste",
         )
         return state
+
+    def _bootstrap_project_style(self, state: HarnessState) -> None:
+        if not self.runtime.auto_style_scan or self.runtime.memory is None:
+            return
+        store = TasteProfileStore(self.runtime.memory)
+        existing_keys = {record.dedupe_key for record in store.records(scope="project")}
+        detected = scan_project_style(
+            Path(state.workspace),
+            max_files=self.runtime.style_scan_max_files,
+        )
+        stored = []
+        for record in detected:
+            if record.dedupe_key in existing_keys:
+                continue
+            stored.append(store.add(record))
+            existing_keys.add(record.dedupe_key)
+        state.scratch["project_style_scanned_count"] = len(stored)
+        self.traces.event(
+            state.run_id,
+            "project_style_scanned",
+            {
+                "detected": len(detected),
+                "stored": len(stored),
+                "records": [record.to_dict() for record in stored],
+            },
+            node="taste",
+        )
 
     def learn(self, state: HarnessState) -> HarnessState:
         if self.taste_profile is None:
@@ -1379,6 +1417,12 @@ class Nodes:
         if not isinstance(context, str) or not context.strip():
             return ""
         return f"\n\nTaste context:\n{context}"
+
+    def _mcp_context(self) -> str:
+        context = self.runtime.mcp_context
+        if not isinstance(context, str) or not context.strip():
+            return ""
+        return context
 
     @staticmethod
     def _recovery_context(state: HarnessState) -> str:

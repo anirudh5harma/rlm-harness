@@ -55,6 +55,7 @@ class EvalCase:
     prompt: str
     workspace: Path
     grader: Grader
+    harness_args: list[str] = field(default_factory=list)
     setup_commands: list[str] = field(default_factory=list)
     files: dict[str, str] = field(default_factory=dict)
     taste_records: list[dict] = field(default_factory=list)
@@ -154,15 +155,9 @@ class EvalRunner:
         try:
             self.prepare_workspace(case)
             self.prepare_case_memory(case, profile_db, memory_db)
+            harness_args = self.case_harness_args(case, profile_db, memory_db)
             completed = subprocess.run(
-                [
-                    *self.harness_command,
-                    "--memory-db",
-                    str(memory_db),
-                    "--profile-db",
-                    str(profile_db),
-                    case.prompt,
-                ],
+                [*self.case_harness_command(case), *harness_args],
                 cwd=workspace,
                 text=True,
                 capture_output=True,
@@ -235,12 +230,15 @@ class EvalRunner:
         memory_db: Path,
     ) -> None:
         profile_db.parent.mkdir(parents=True, exist_ok=True)
-        with Memory(profile_db) as profile_memory:
-            store = TasteProfileStore(profile_memory)
+        with Memory(profile_db) as profile_memory, Memory(memory_db) as project_memory:
+            user_taste_store = TasteProfileStore(profile_memory)
+            project_taste_store = TasteProfileStore(project_memory)
             for raw in case.taste_records:
+                scope = str(raw.get("scope", "user"))
+                store = project_taste_store if scope == "project" else user_taste_store
                 store.add(
                     TasteRecord.create(
-                        scope=str(raw.get("scope", "user")),
+                        scope=scope,
                         kind=str(raw.get("kind", "preference")),
                         text=str(raw["text"]),
                         confidence=float(raw.get("confidence", 0.95)),
@@ -254,12 +252,40 @@ class EvalRunner:
                     continue
                 evolution_store.add(proposal_from_eval(case, raw))
 
-        with Memory(memory_db) as project_memory:
             evolution_store = EvolutionProposalStore(project_memory)
             for raw in case.evolution_proposals:
                 if str(raw.get("scope", "user")) == "user":
                     continue
                 evolution_store.add(proposal_from_eval(case, raw))
+
+    def case_harness_command(self, case: EvalCase) -> list[str]:
+        if not case.harness_args:
+            return list(self.harness_command)
+        return strip_default_run_command(self.harness_command)
+
+    def case_harness_args(
+        self,
+        case: EvalCase,
+        profile_db: Path,
+        memory_db: Path,
+    ) -> list[str]:
+        if not case.harness_args:
+            return [
+                "--memory-db",
+                str(memory_db),
+                "--profile-db",
+                str(profile_db),
+                case.prompt,
+            ]
+        return [
+            render_case_arg(
+                arg,
+                workspace=case.workspace,
+                profile_db=profile_db,
+                memory_db=memory_db,
+            )
+            for arg in case.harness_args
+        ]
 
 
 def proposal_from_eval(case: EvalCase, raw: dict) -> EvolutionProposal:
@@ -311,6 +337,27 @@ def normalize_python_argv(command: list[str]) -> list[str]:
     if command and command[0] == "python" and shutil.which("python") is None:
         return [sys.executable, *command[1:]]
     return command
+
+
+def strip_default_run_command(command: list[str]) -> list[str]:
+    if "run" not in command:
+        return list(command)
+    run_index = command.index("run")
+    return list(command[:run_index])
+
+
+def render_case_arg(
+    value: str,
+    *,
+    workspace: Path,
+    profile_db: Path,
+    memory_db: Path,
+) -> str:
+    return (
+        value.replace("{workspace}", str(workspace))
+        .replace("{profile_db}", str(profile_db))
+        .replace("{memory_db}", str(memory_db))
+    )
 
 
 def normalize_python_command(command: str) -> str:

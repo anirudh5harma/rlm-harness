@@ -25,6 +25,7 @@ class EvalSuiteFileLoader:
                     id=case_id,
                     prompt=prompt,
                     workspace=work_root / case_id,
+                    harness_args=[str(arg) for arg in raw.get("harness_args", [])],
                     files={str(k): str(v) for k, v in raw.get("files", {}).items()},
                     setup_commands=[str(cmd) for cmd in raw.get("setup_commands", [])],
                     taste_records=[dict(item) for item in raw.get("taste_records", [])],

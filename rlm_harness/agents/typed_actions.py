@@ -25,6 +25,7 @@ class ActionParseError(ValueError):
 
 
 ToolActionParseError = ActionParseError
+HOST_TYPED_TOOL_KINDS = {"mcp_list_tools", "mcp_call_tool"}
 
 
 def parse_typed_tool_action(text: str) -> AnyAction:
@@ -44,7 +45,7 @@ def parse_typed_tool_action(text: str) -> AnyAction:
     except Exception as exc:
         raise ActionParseError(f"tool action did not match a known schema: {exc}") from exc
 
-    allowed_action_kinds = set(sandbox_tools.tool_names())
+    allowed_action_kinds = set(sandbox_tools.tool_names()) | HOST_TYPED_TOOL_KINDS
     if action.kind not in allowed_action_kinds:
         raise ActionParseError(f"tool action is not executable in this runtime: {action.kind}")
     return action
@@ -144,7 +145,7 @@ def legacy_status_from_observation(observation: AnyObservation) -> str:
 
 def executable_tool_payload(autonomy: AutonomyMode | str = AutonomyMode.SANDBOX) -> list[dict]:
     registry = default_tool_registry()
-    executable_names = set(sandbox_tools.tool_names())
+    executable_names = set(sandbox_tools.tool_names()) | HOST_TYPED_TOOL_KINDS
     payload = []
     for descriptor in registry.all():
         if descriptor.name not in executable_names:
@@ -182,6 +183,13 @@ def default_action_payload(action_kind: str) -> dict:
         "list_pending_changes": {"kind": "list_pending_changes"},
         "apply_pending_change": {"kind": "apply_pending_change", "change_id": "pending"},
         "clear_pending_changes": {"kind": "clear_pending_changes"},
+        "mcp_list_tools": {"kind": "mcp_list_tools", "server": "server-name"},
+        "mcp_call_tool": {
+            "kind": "mcp_call_tool",
+            "server": "server-name",
+            "tool_name": "tool",
+            "arguments": {},
+        },
         "complete_task": {"kind": "complete_task", "summary": "done"},
     }
     return payloads[action_kind]

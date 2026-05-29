@@ -18,22 +18,21 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ## First run
 
-Check whether Harness is ready for daily coding work:
+Bootstrap Harness from a project directory:
+
+```bash
+harness init --provider openrouter --api-key <key>
+```
+
+`init` saves provider configuration, scans the project for style and verification
+conventions, summarizes configured MCP servers, and prints readiness checks. You
+can still run the pieces individually:
 
 ```bash
 harness readiness
-```
-
-Choose a provider and save your API key:
-
-```bash
 harness /provider
-```
-
-Then choose a model:
-
-```bash
 harness /model
+harness taste scan
 ```
 
 Start Harness from any project directory:
@@ -41,6 +40,10 @@ Start Harness from any project directory:
 ```bash
 harness
 ```
+
+Harness will not silently run real tasks on the built-in `stub` provider. Fresh
+installs are guided to `harness init` first; pass `--provider stub` only for an
+intentional smoke test.
 
 After a useful run, teach it your taste:
 
@@ -66,28 +69,74 @@ important values are highlighted in cyan/blue when the terminal supports color.
 
 ```bash
 harness                              # interactive mode
+harness /                            # show slash commands and action tools
 harness ask "what is this project?"   # read-only workspace answer
 harness plan "how should we fix it?"  # read-only implementation plan
 harness "fix the failing tests"       # run one task with sandboxed typed tools
+harness -p "summarize the repo"       # one-shot headless alias
+harness --plan "add OAuth"            # one-shot read-only plan alias
 harness run "fix tests" --act-engine rlm  # use the legacy recursive engine
+harness run "fix tests" --permission-mode standard
+harness work "fix the failing tests" --auto-accept
 harness work "fix the failing tests"  # explicit typed-tool work command
 harness continue "do the next step"   # continue the latest thread
 harness commands                     # list the clean public command surface
-harness status                       # show provider, latest run, taste, and evolution
+harness status                       # show current state and recommended next actions
 harness tools                        # inspect tool capabilities and risk
+harness init --provider openrouter --api-key <key>
+harness mcp list                     # inspect configured MCP servers
+harness mcp setup                    # guided MCP setup for downloaded users
+harness mcp tools github             # verify an MCP server and list its tools
+harness mcp trust github             # allow autonomous calls to a vetted MCP
+harness mcp disable github           # pause a configured MCP without deleting it
+harness mcp add github --transport http --url https://mcp.example/github \
+  --auth bearer_env --token-env GITHUB_TOKEN --purpose github
+harness mcp add files --transport stdio --command npx --purpose files \
+  --args -y @modelcontextprotocol/server-filesystem "$PWD"
 harness /provider openrouter --api-key <key>
 harness /model qwen/qwen3.7-max
 harness /config
 harness readiness                     # check first-run and daily-driver setup
 harness dogfood                       # run readiness, eval, and feedback proof checks
 harness taste                         # show active taste and project conventions
+harness taste context                 # show the prompt context future runs will receive
 harness taste learn "Prefer small, reviewable diffs." --active
+harness taste scan                    # learn project style and verification conventions
 harness profile                      # show learned taste and project conventions
 harness profile learn "Prefer small, reviewable diffs." --active
 harness evolve                       # review proposed prompt/policy/eval improvements
 harness feedback add "Liked the concise summary." --rating good
 harness doctor
 ```
+
+Inside interactive mode, type `/` to show the full slash palette: public commands,
+runtime commands, and action tools grouped by scope. Harness keeps compatibility
+aliases where they are useful (`-p`, `--plan`, `--permission-mode`,
+`--auto-accept`), but the primary shape is Harness-native: `ask` for read-only
+answers, `plan` for read-only implementation plans, `work` for edits, `continue`
+for thread flow, and `taste` for learning your preferences over time.
+Use `harness status` as the daily-driver handoff: it summarizes provider/API key
+state, latest thread, taste, evolution, MCP configuration, storage paths, and a
+short `next` list.
+
+MCP servers are configured separately in `~/.harness/mcp.json` (or
+`HARNESS_MCP_CONFIG`). Each server has transport, auth, and purpose metadata.
+Local stdio MCPs run as subprocesses with newline-delimited JSON-RPC, bounded
+timeouts, and optional `--env KEY=value` entries; hosted streamable HTTP/SSE
+MCPs include the negotiated protocol/session headers and env-backed auth.
+During a run, Harness injects enabled MCP purpose routes into planning and action
+selection, highlights purpose matches for the current task, and exposes
+`mcp_list_tools` / `mcp_call_tool` typed actions for workflow-time tool discovery
+and invocation. Auth uses env-backed bearer/API-key config so downloaded users
+can keep credentials out of the config file. Trusted MCP servers may be called
+autonomously; approval-gated MCPs require explicit approval before remote tool
+calls.
+Use `harness mcp tools <name>` to smoke-test auth and inspect exposed tools,
+`harness mcp trust/untrust <name>` to control autonomous use, and
+`harness mcp enable/disable <name>` to scope what a downloaded user's harness can
+see during workflows.
+For first-time setup, `harness mcp setup` walks through name, transport,
+endpoint, purpose labels, and env-var-backed auth without storing raw secrets.
 
 Supported provider shortcuts include `openrouter`, `openai`, `groq`, `together`,
 `fireworks`, `deepinfra`, `opencode-go`, `custom`, and `stub`.
@@ -101,11 +150,21 @@ under the current workspace's `.rlm_harness/` directory by default.
 Harness learns durable preferences and project conventions as it runs. Explicit
 phrases like "I prefer concise final answers" are promoted into the user profile,
 successful verification commands are remembered for the current project, and the
-next run receives that taste as context before planning or editing.
+first memory-enabled run in a workspace automatically scans project style
+conventions into project memory. The next planning/editing step receives that
+taste as context before it acts.
 
-Use `harness taste` to inspect active records, `harness taste learn ...` to
+Use `harness taste` to inspect active records, `harness taste context` to see
+the exact preference block future runs receive, `harness taste learn ...` to
 teach it directly, and `harness taste approve/reject <id>` to manage pending
-records. `harness profile` remains available as a compatibility alias.
+records. `harness taste scan` inspects the current workspace on demand and stores
+evidence-backed project style and verification conventions in project memory.
+It looks at common project signals such as `pyproject.toml`, `package.json`,
+`.editorconfig`, Prettier config, package-manager metadata, and sampled source
+formatting.
+Normal memory-enabled runs do the same bootstrap automatically; use
+`--no-style-scan` to opt out for a run. `harness profile` remains available as a
+compatibility alias.
 
 ## Feedback learning
 

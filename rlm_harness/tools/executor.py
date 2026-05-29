@@ -23,6 +23,8 @@ from rlm_harness.actions import (
     GitStatusAction,
     ListFilesAction,
     ListPendingChangesAction,
+    MCPCallToolAction,
+    MCPListToolsAction,
     ObservationStatus,
     PatchObservation,
     PermissionObservation,
@@ -39,6 +41,8 @@ from rlm_harness.actions import (
     WriteFileAction,
 )
 from rlm_harness.kernel import AutonomyMode
+from rlm_harness.mcp_client import MCPClient
+from rlm_harness.mcp_config import MCPConfigStore
 from rlm_harness.sandbox import tools as sandbox_tools
 from rlm_harness.tools.authorization import authorize_tool_action
 from rlm_harness.tools.registry import ToolRegistry, default_tool_registry
@@ -50,10 +54,12 @@ class ToolExecutor:
         workspace: Path,
         registry: Optional[ToolRegistry] = None,
         autonomy: AutonomyMode | str = AutonomyMode.SANDBOX,
+        mcp_store: Optional[MCPConfigStore] = None,
     ):
         self.workspace = workspace.resolve()
         self.registry = registry or default_tool_registry()
         self.autonomy = autonomy
+        self.mcp_store = mcp_store or MCPConfigStore()
 
     def execute(self, action: AnyAction, *, approved: bool = False) -> AnyObservation:
         descriptor = self.registry.for_action_kind(action.kind)
@@ -76,7 +82,11 @@ class ToolExecutor:
         started = time.monotonic()
         try:
             with workspace_context(self.workspace):
-                return self._execute(action, elapsed_ms=lambda: elapsed_ms(started))
+                return self._execute(
+                    action,
+                    approved=approved,
+                    elapsed_ms=lambda: elapsed_ms(started),
+                )
         except Exception as exc:
             return ErrorObservation(
                 action_id=action.action_id,
@@ -85,7 +95,7 @@ class ToolExecutor:
                 summary=f"{action.kind} failed",
             )
 
-    def _execute(self, action: AnyAction, *, elapsed_ms) -> AnyObservation:
+    def _execute(self, action: AnyAction, *, approved: bool, elapsed_ms) -> AnyObservation:
         if isinstance(action, ReadFileAction):
             return FileObservation(
                 action_id=action.action_id,
@@ -248,6 +258,35 @@ class ToolExecutor:
                 action_id=action.action_id,
                 text=sandbox_tools.clear_pending_changes(),
                 summary="cleared pending changes",
+            )
+        if isinstance(action, MCPListToolsAction):
+            server = self.mcp_store.select(action.server, action.purpose)
+            result = MCPClient(server, timeout_s=action.timeout_s).list_tools()
+            return DataObservation(
+                action_id=action.action_id,
+                data={"server": server.name, **result},
+                summary=f"listed MCP tools from {server.name}",
+            )
+        if isinstance(action, MCPCallToolAction):
+            server = self.mcp_store.select(action.server, action.purpose)
+            if not server.trusted and not approved:
+                return PermissionObservation(
+                    action_id=action.action_id,
+                    decision="needs_confirmation",
+                    reason=(
+                        f"MCP server {server.name} is approval-gated. "
+                        "Mark it trusted for autonomous workflow calls."
+                    ),
+                    summary=f"MCP call requires trust for {server.name}",
+                )
+            result = MCPClient(server, timeout_s=action.timeout_s).call_tool(
+                action.tool_name,
+                action.arguments,
+            )
+            return DataObservation(
+                action_id=action.action_id,
+                data={"server": server.name, "tool": action.tool_name, "result": result},
+                summary=f"called MCP tool {server.name}.{action.tool_name}",
             )
         if isinstance(action, CompleteTaskAction):
             return TextObservation(
