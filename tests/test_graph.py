@@ -207,10 +207,13 @@ class GraphTests(unittest.TestCase):
         answer = normalize_user_output(str(overview), task="summarize this project")
 
         self.assertIn("Project Summary", answer)
-        self.assertIn("Tech stack: Node.js, TypeScript, React", answer)
+        self.assertIn("It appears to use Node.js, TypeScript, React", answer)
         self.assertIn("TanStack Start", answer)
-        self.assertIn("Useful commands", answer)
-        self.assertIn("npm run dev", answer)
+        self.assertIn("What I would do next", answer)
+        self.assertIn("Verification I would run", answer)
+        self.assertIn("npm run build", answer)
+        self.assertNotIn("Files inspected", answer)
+        self.assertNotIn("Working tree:", answer)
         self.assertNotIn("{'files':", answer)
 
     def test_what_is_this_project_is_project_summary_task(self):
@@ -339,6 +342,7 @@ class GraphTests(unittest.TestCase):
         system_prompt = messages[0].content
         self.assertIn("project_summary()", system_prompt)
         self.assertIn("Never print raw source code", system_prompt)
+        self.assertIn("plain, friendly English", system_prompt)
 
     def test_action_prompt_routes_project_audit_to_audit_tool(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -428,9 +432,9 @@ class GraphTests(unittest.TestCase):
                 sandbox_tools.WORKSPACE = old_workspace
 
         self.assertIn("Project Gap Analysis", audit)
-        self.assertIn("Findings", audit)
+        self.assertIn("What I would fix or clarify next", audit)
         self.assertIn("Evidence:", audit)
-        self.assertIn("Recommendation:", audit)
+        self.assertIn("Next move:", audit)
 
     def test_project_summary_reflects_source_dump_as_incomplete(self):
         source_dump = "\n".join(
@@ -547,6 +551,7 @@ class GraphTests(unittest.TestCase):
 
         self.assertIn("Project Summary", answer)
         self.assertIn("personal portfolio app", answer)
+        self.assertIn("What I would do next", answer)
         self.assertNotEqual(answer, bad_answer)
 
     def test_stopped_project_summary_source_dump_does_not_return_source(self):

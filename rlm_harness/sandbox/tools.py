@@ -298,49 +298,33 @@ def render_project_overview_summary(payload: dict) -> str:
     doc_paths = [str(doc.get("path")) for doc in documents if doc.get("path")]
     package = package_json_from_documents(documents)
     pyproject = pyproject_from_documents(documents)
+    cargo = cargo_package_from_documents(documents)
     scripts = package.get("scripts", {}) if package else {}
     dependencies = package_dependencies(package)
 
     sections = ["Project Summary"]
-    name = project_name(package, pyproject)
-    description = project_description(package, pyproject, documents)
-    if name or description:
-        if name and description:
-            sections.append(f"What it is: {name} - {description}")
-        elif name:
-            sections.append(f"What it is: {name}")
-        else:
-            sections.append(f"What it is: {description}")
-
-    sections.append(f"Files inspected: {len(files)}")
-    if doc_paths:
-        sections.append("Key config/docs: " + ", ".join(doc_paths[:8]))
-
-    stack = infer_project_stack(files, documents, dependencies)
-    if stack:
-        sections.append("Tech stack: " + ", ".join(stack))
-
+    name = project_name(package, pyproject, cargo)
+    description = project_description(package, pyproject, cargo, documents)
+    stack = infer_project_stack(files, documents, dependencies, cargo)
     architecture = infer_project_architecture(files)
-    if architecture:
-        sections.append("Architecture: " + architecture)
 
-    commands = render_scripts(scripts)
-    if commands:
-        sections.append("Useful commands:\n" + commands)
+    sections.append(render_project_identity(name, description, stack, architecture))
 
-    git_status_text = str(payload.get("git_status") or "").strip()
-    if git_status_text:
-        sections.append("Working tree:\n" + git_status_text)
+    orientation = project_orientation_files(files, doc_paths)
+    if orientation:
+        sections.append("I would orient around:\n" + "\n".join(f"- {line}" for line in orientation))
 
-    git_log_text = str(payload.get("git_log") or "").strip()
-    if git_log_text:
-        sections.append("Recent commits:\n" + "\n".join(git_log_text.splitlines()[:5]))
+    next_steps = project_next_steps(files, scripts, payload, cargo)
+    if next_steps:
+        sections.append("What I would do next:\n" + "\n".join(f"- {step}" for step in next_steps))
 
-    notable_files = notable_source_files(files)
-    if notable_files:
-        sections.append(
-            "Notable source files:\n" + "\n".join(f"- {path}" for path in notable_files)
-        )
+    verification = project_verification_note(files, scripts, cargo)
+    if verification:
+        sections.append(verification)
+
+    worktree_note = friendly_worktree_note(str(payload.get("git_status") or ""))
+    if worktree_note:
+        sections.append(worktree_note)
 
     return "\n\n".join(sections)
 
@@ -350,21 +334,25 @@ def render_project_audit(payload: dict) -> str:
     documents = [doc for doc in payload.get("documents", []) if isinstance(doc, dict)]
     package = package_json_from_documents(documents)
     pyproject = pyproject_from_documents(documents)
+    cargo = cargo_package_from_documents(documents)
     dependencies = package_dependencies(package)
     scripts = package.get("scripts", {}) if package else {}
-    stack = infer_project_stack(files, documents, dependencies)
+    stack = infer_project_stack(files, documents, dependencies, cargo)
     findings = project_audit_findings(files, documents, package, pyproject)
 
     sections = ["Project Gap Analysis"]
-    summary = project_description(package, pyproject, documents)
+    summary = project_description(package, pyproject, cargo, documents)
     if summary:
-        sections.append("Context: " + summary)
+        sections.append("Here is my read: " + summary)
     if stack:
-        sections.append("Detected stack: " + ", ".join(stack))
+        sections.append("The working stack looks like " + human_join(stack) + ".")
 
     reviewed = audit_reviewed_paths(files, documents)
     if reviewed:
-        sections.append("Evidence reviewed:\n" + "\n".join(f"- {path}" for path in reviewed))
+        sections.append(
+            "I checked the high-signal files first:\n"
+            + "\n".join(f"- {path}" for path in reviewed[:8])
+        )
 
     if findings:
         rendered_findings = []
@@ -372,27 +360,144 @@ def render_project_audit(payload: dict) -> str:
             rendered_findings.append(
                 "\n".join(
                     [
-                        f"{index}. [{finding['severity']}] {finding['title']}",
+                        f"{index}. {finding['title']}",
+                        f"   Why it matters: {finding['impact']}",
                         f"   Evidence: {finding['evidence']}",
-                        f"   Impact: {finding['impact']}",
-                        f"   Recommendation: {finding['recommendation']}",
+                        f"   Next move: {finding['recommendation']}",
                     ]
                 )
             )
-        sections.append("Findings:\n" + "\n\n".join(rendered_findings))
+        sections.append("What I would fix or clarify next:\n" + "\n\n".join(rendered_findings))
     else:
         sections.append(
-            "Findings:\n"
-            "No obvious structural gaps were detected from the high-level project files. "
-            "A stronger audit should still inspect feature code, run the test suite, and "
-            "exercise the main user workflows."
+            "What I would do next:\n"
+            "- I do not see an obvious structural red flag from the high-level files.\n"
+            "- I would inspect the feature code behind the main CLI or app entrypoint next.\n"
+            "- I would run the project verification command before making broad edits."
         )
 
-    commands = audit_verification_commands(scripts, files)
+    commands = audit_verification_commands(scripts, files, cargo)
     if commands:
-        sections.append("Suggested verification:\n" + "\n".join(f"- {cmd}" for cmd in commands))
+        sections.append("Verification I would run:\n" + "\n".join(f"- {cmd}" for cmd in commands))
 
     return "\n\n".join(sections)
+
+
+def render_project_identity(
+    name: str,
+    description: str,
+    stack: list[str],
+    architecture: str,
+) -> str:
+    subject = name or "this project"
+    if description:
+        sentence = f"{subject} is {sentence_fragment(description)}."
+    else:
+        sentence = f"{subject} is a software project with a few clear entrypoints."
+
+    details = []
+    if stack:
+        details.append(f"It appears to use {human_join(stack)}.")
+    if architecture:
+        details.append(f"The code is organized around {architecture}.")
+    if details:
+        sentence = f"{sentence} {' '.join(details)}"
+    return sentence
+
+
+def project_orientation_files(files: list[str], doc_paths: list[str]) -> list[str]:
+    lines = []
+    for path in doc_paths[:4]:
+        lines.append(orientation_description(path))
+    for path in notable_source_files(files):
+        if path in doc_paths:
+            continue
+        lines.append(orientation_description(path))
+        if len(lines) >= 6:
+            break
+    return dedupe(lines)
+
+
+def project_next_steps(
+    files: list[str],
+    scripts: dict,
+    payload: dict,
+    cargo: dict | None = None,
+) -> list[str]:
+    steps = []
+    if "README.md" in files or "readme.md" in {path.lower() for path in files}:
+        steps.append("Read the README once, then inspect the main entrypoint before editing.")
+    else:
+        steps.append("Add or find a short project overview so future work has a clear map.")
+
+    git_status_text = str(payload.get("git_status") or "").strip()
+    if git_status_text:
+        steps.append("Review the existing uncommitted changes before making broad edits.")
+
+    if any(path.startswith("tests/") for path in files):
+        steps.append("Use the tests as the guardrail for focused code changes.")
+    elif "Cargo.toml" in files:
+        steps.append("Add or locate Rust tests around the behavior you want to change.")
+
+    return dedupe(steps)[:4]
+
+
+def project_verification_note(files: list[str], scripts: dict, cargo: dict | None = None) -> str:
+    commands = audit_verification_commands(scripts, files, cargo)
+    if commands:
+        return "Verification I would run:\n" + "\n".join(f"- {cmd}" for cmd in commands[:3])
+    return "Verification: I do not see a standard test command yet."
+
+
+def friendly_worktree_note(git_status_text: str) -> str:
+    changed = [line for line in git_status_text.splitlines() if line.strip()]
+    if not changed:
+        return ""
+    return (
+        "I also see uncommitted workspace changes; "
+        "I would keep edits scoped until those are understood."
+    )
+
+
+def human_join(values: list[str]) -> str:
+    if not values:
+        return ""
+    if len(values) == 1:
+        return values[0]
+    if len(values) == 2:
+        return f"{values[0]} and {values[1]}"
+    return ", ".join(values[:-1]) + f", and {values[-1]}"
+
+
+def sentence_fragment(text: str) -> str:
+    fragment = clean_markdown_inline(text).strip().rstrip(".")
+    if not fragment:
+        return "a software project"
+    if fragment.startswith(("A ", "An ", "The ")):
+        fragment = fragment[0].lower() + fragment[1:]
+    elif len(fragment) > 1 and fragment[0].isupper() and fragment[1].islower():
+        fragment = fragment[0].lower() + fragment[1:]
+    return fragment
+
+
+def orientation_description(path: str) -> str:
+    if path.lower().startswith("readme"):
+        return f"{path} for the purpose and setup story"
+    if path == "Cargo.toml":
+        return "Cargo.toml for Rust package layout and verification commands"
+    if path == "package.json":
+        return "package.json for scripts and frontend dependencies"
+    if path == "pyproject.toml":
+        return "pyproject.toml for Python packaging and tooling"
+    if path.endswith("/src/main.rs") or path == "src/main.rs":
+        return f"{path} for the CLI or binary entrypoint"
+    if "graph/" in path:
+        return f"{path} for agent orchestration"
+    if "rlm/runtime" in path:
+        return f"{path} for the recursive execution loop"
+    if "sandbox/tools" in path:
+        return f"{path} for workspace tools"
+    return f"{path} for the main implementation shape"
 
 
 def project_audit_findings(
@@ -563,7 +668,11 @@ def audit_reviewed_paths(files: list[str], documents: list[dict]) -> list[str]:
     return [path for path in dedupe(preferred) if path in files][:12]
 
 
-def audit_verification_commands(scripts: dict, files: list[str]) -> list[str]:
+def audit_verification_commands(
+    scripts: dict,
+    files: list[str],
+    cargo: dict | None = None,
+) -> list[str]:
     commands = []
     if isinstance(scripts, dict):
         for name in ("test", "lint", "typecheck", "build"):
@@ -571,6 +680,8 @@ def audit_verification_commands(scripts: dict, files: list[str]) -> list[str]:
                 commands.append(f"npm run {name}")
     if "pyproject.toml" in files and any(path.startswith("tests/") for path in files):
         commands.append("pytest")
+    if cargo and "Cargo.toml" in files:
+        commands.append("cargo test")
     return commands
 
 
@@ -589,6 +700,13 @@ def pyproject_from_documents(documents: list[dict]) -> dict:
     for doc in documents:
         if doc.get("path") == "pyproject.toml" and isinstance(doc.get("content"), str):
             return parse_pyproject_metadata(str(doc["content"]))
+    return {}
+
+
+def cargo_package_from_documents(documents: list[dict]) -> dict:
+    for doc in documents:
+        if doc.get("path") == "Cargo.toml" and isinstance(doc.get("content"), str):
+            return parse_toml_section(str(doc["content"]), "package")
     return {}
 
 
@@ -626,19 +744,57 @@ def parse_pyproject_metadata(content: str) -> dict:
     return metadata
 
 
-def project_name(package: dict, pyproject: dict) -> str:
-    for payload in (package, pyproject):
+def parse_toml_section(content: str, section_name: str) -> dict:
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        tomllib = None
+
+    if tomllib is not None:
+        try:
+            payload = tomllib.loads(content)
+        except ValueError:
+            payload = {}
+        section = payload.get(section_name) if isinstance(payload, dict) else None
+        return section if isinstance(section, dict) else {}
+
+    metadata: dict[str, str] = {}
+    in_section = False
+    expected_header = f"[{section_name}]"
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            in_section = line == expected_header
+            continue
+        if not in_section or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip().strip("\"'")
+        if value:
+            metadata[key.strip()] = value
+    return metadata
+
+
+def project_name(package: dict, pyproject: dict, cargo: dict | None = None) -> str:
+    for payload in (package, pyproject, cargo or {}):
         name = payload.get("name") if isinstance(payload, dict) else None
         if isinstance(name, str) and name.strip():
             return name.strip()
     return ""
 
 
-def project_description(package: dict, pyproject: dict, documents: list[dict]) -> str:
-    for payload in (package, pyproject):
+def project_description(
+    package: dict,
+    pyproject: dict,
+    cargo: dict | None,
+    documents: list[dict],
+) -> str:
+    for payload in (package, pyproject, cargo or {}):
         description = payload.get("description") if isinstance(payload, dict) else None
         if isinstance(description, str) and description.strip():
-            return one_line(description)
+            return one_line(clean_markdown_inline(description))
 
     readme = readme_content_from_documents(documents)
     if readme:
@@ -658,8 +814,14 @@ def readme_content_from_documents(documents: list[dict]) -> str:
 def first_readme_paragraph(content: str) -> str:
     lines = []
     seen_heading = False
+    in_fence = False
     for raw_line in content.splitlines():
         line = raw_line.strip()
+        if line.startswith("```") or line.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        if in_fence or is_readme_noise_line(line):
+            continue
         if not line:
             if lines:
                 break
@@ -668,8 +830,32 @@ def first_readme_paragraph(content: str) -> str:
             seen_heading = True
             continue
         if seen_heading or not lines:
-            lines.append(line)
+            cleaned = clean_markdown_inline(line)
+            if cleaned:
+                lines.append(cleaned)
     return " ".join(lines)
+
+
+def is_readme_noise_line(line: str) -> bool:
+    if not line:
+        return False
+    lowered = line.lower()
+    return (
+        line.startswith("<!--")
+        or "![" in line
+        or "shields.io" in lowered
+        or "skills.sh" in lowered
+        or lowered.startswith("[![")
+    )
+
+
+def clean_markdown_inline(text: str) -> str:
+    cleaned = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", cleaned)
+    cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+    cleaned = re.sub(r"<[^>]+>", "", cleaned)
+    cleaned = cleaned.strip("#*-_ \t")
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 def one_line(text: str, max_chars: int = 240) -> str:
@@ -692,6 +878,7 @@ def infer_project_stack(
     files: list[str],
     documents: list[dict],
     dependencies: set[str],
+    cargo: dict | None = None,
 ) -> list[str]:
     stack = []
     if "package.json" in {doc.get("path") for doc in documents}:
@@ -712,6 +899,10 @@ def infer_project_stack(
         stack.append("Radix UI")
     if "pyproject.toml" in files:
         stack.append("Python")
+    if cargo or "Cargo.toml" in files or any(path.endswith(".rs") for path in files):
+        stack.append("Rust")
+    if "go.mod" in files:
+        stack.append("Go")
     return dedupe(stack)
 
 
@@ -753,8 +944,10 @@ def render_scripts(scripts: dict) -> str:
 def notable_source_files(files: list[str]) -> list[str]:
     preferred = [
         "package.json",
+        "Cargo.toml",
         "pyproject.toml",
         "README.md",
+        "crates/sansara-cli/src/main.rs",
         "rlm_harness/cli.py",
         "rlm_harness/graph/nodes.py",
         "rlm_harness/rlm/runtime.py",

@@ -175,6 +175,49 @@ class DockerREPLConfigTests(unittest.TestCase):
             finally:
                 sandbox_tools.WORKSPACE = old_workspace
 
+    def test_project_summary_uses_friendly_brief_and_skips_badges(self):
+        summary = sandbox_tools.render_project_overview_summary(
+            {
+                "files": [
+                    "README.md",
+                    "Cargo.toml",
+                    "crates/sansara-cli/src/main.rs",
+                    "crates/sansara-cli/tests/help_integration.rs",
+                ],
+                "documents": [
+                    {
+                        "path": "README.md",
+                        "content": (
+                            "[![skills.sh](https://skills.sh/b/a3fckx/sansara)]"
+                            "(https://skills.sh/b/a3fckx/sansara)\n\n"
+                            "# Sansara\n\n"
+                            "Vault-native agent OS for coding assistants.\n"
+                        ),
+                    },
+                    {
+                        "path": "Cargo.toml",
+                        "content": (
+                            "[package]\n"
+                            "name = \"sansara\"\n"
+                            "description = \"Vault-native agent OS.\"\n"
+                        ),
+                    },
+                ],
+                "git_status": "M crates/sansara-cli/src/main.rs\n",
+                "git_log": "3236378 chore: simplify routing\n",
+            }
+        )
+
+        self.assertIn("Project Summary", summary)
+        self.assertIn("sansara is vault-native agent OS.", summary)
+        self.assertIn("It appears to use Rust.", summary)
+        self.assertIn("What I would do next", summary)
+        self.assertIn("Verification I would run", summary)
+        self.assertIn("cargo test", summary)
+        self.assertNotIn("skills.sh", summary)
+        self.assertNotIn("Files inspected", summary)
+        self.assertNotIn("Working tree:", summary)
+
 
 @unittest.skipUnless(docker_available(), "Docker daemon is not available")
 class DockerREPLTests(unittest.TestCase):
