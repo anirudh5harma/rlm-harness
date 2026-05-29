@@ -5,12 +5,14 @@ description = "A local recursive coding-agent harness with a clean CLI."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "langgraph>=0.2",
+  "langgraph-checkpoint-sqlite>=3.1",
   "pydantic>=2",
   "sqlite-vec>=0.1",
 ]
 
 [project.optional-dependencies]
-graph = ["langgraph>=0.2", "langgraph-checkpoint-sqlite>=3.1"]
+graph = []
 memory = [
   "sentence-transformers>=3",
 ]
@@ -29,7 +31,7 @@ rlm-harness = "rlm_harness.cli:main"
 include = ["rlm_harness*"]
 
 [tool.setuptools.package-data]
-rlm_harness = ["memory/schema.sql"]
+rlm_harness = ["memory/schema.sql", "evals/suites/*.json"]
 
 [tool.ruff]
 line-length = 100

@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
@@ -42,10 +43,91 @@ PROJECT_OVERVIEW_CANDIDATES = (
     "next.config.js",
     "vite.config.ts",
 )
+_COMPLETION_SINK = None
+_PENDING_CHANGES: dict[str, dict[str, Any]] = {}
 
 
 class ToolError(RuntimeError):
     pass
+
+
+def set_completion_sink(callback) -> None:
+    global _COMPLETION_SINK
+    _COMPLETION_SINK = callback
+
+
+def complete_task(
+    summary: str,
+    status: str = "success",
+    verification: Optional[str] = None,
+) -> dict[str, Any]:
+    if not isinstance(summary, str) or not summary.strip():
+        raise ToolError("summary must be a non-empty string")
+    if status not in {"success", "partial", "blocked"}:
+        raise ToolError("status must be success, partial, or blocked")
+    payload = {
+        "summary": summary.strip(),
+        "status": status,
+        "verification": verification or "",
+        "should_continue": False,
+    }
+    if _COMPLETION_SINK is not None:
+        _COMPLETION_SINK(payload)
+    return payload
+
+
+def propose_file_change(path: str, content: str, reason: str = "") -> dict[str, Any]:
+    target = workspace_path(path)
+    if target.exists() and not target.is_file():
+        raise ToolError(f"not a file: {path}")
+    change_id = f"change-{uuid.uuid4().hex[:12]}"
+    before = ""
+    if target.is_file():
+        before = target.read_text(encoding="utf-8", errors="replace")
+    pending = {
+        "id": change_id,
+        "path": str(target.relative_to(WORKSPACE)),
+        "reason": reason,
+        "before": before,
+        "content": content,
+        "diff": unified_diff(str(target.relative_to(WORKSPACE)), before, content),
+    }
+    _PENDING_CHANGES[change_id] = pending
+    return {
+        "id": change_id,
+        "path": pending["path"],
+        "reason": reason,
+        "diff": pending["diff"],
+        "approval_required": True,
+    }
+
+
+def list_pending_changes() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": change["id"],
+            "path": change["path"],
+            "reason": change["reason"],
+            "diff": change["diff"],
+        }
+        for change in _PENDING_CHANGES.values()
+    ]
+
+
+def apply_pending_change(change_id: str) -> str:
+    change_id = change_id.strip()
+    if not change_id:
+        raise ToolError("change_id must be non-empty")
+    change = _PENDING_CHANGES.pop(change_id, None)
+    if change is None:
+        raise ToolError(f"unknown pending change: {change_id}")
+    return write_file(str(change["path"]), str(change["content"]))
+
+
+def clear_pending_changes() -> str:
+    count = len(_PENDING_CHANGES)
+    _PENDING_CHANGES.clear()
+    return f"cleared {count} pending change(s)"
 
 
 def read_file(path: str, max_bytes: int = DEFAULT_MAX_READ_BYTES) -> str:
@@ -774,11 +856,20 @@ def apply_patch(diff: str, timeout: float = DEFAULT_TIMEOUT_S) -> str:
     return "patch applied"
 
 
-def run_shell(cmd: str, timeout: float = DEFAULT_TIMEOUT_S) -> dict[str, Any]:
+def run_shell(
+    cmd: str,
+    timeout: float = DEFAULT_TIMEOUT_S,
+    allow_dangerous: bool = False,
+) -> dict[str, Any]:
     if not cmd.strip():
         raise ToolError("cmd must be non-empty")
     if timeout <= 0:
         raise ToolError("timeout must be positive")
+    if not allow_dangerous and looks_dangerous_command(cmd):
+        raise ToolError(
+            "command looks destructive; ask the user for approval or pass "
+            "allow_dangerous=True only after explicit approval"
+        )
     try:
         result = subprocess.run(
             cmd,
@@ -859,6 +950,10 @@ def search_code(pattern: str, path: str = ".", max_count: int = 100) -> str:
 def tool_names() -> list[str]:
     return [
         "read_file",
+        "propose_file_change",
+        "list_pending_changes",
+        "apply_pending_change",
+        "clear_pending_changes",
         "read_file_slice",
         "chunk_file",
         "read_first_existing",
@@ -873,6 +968,7 @@ def tool_names() -> list[str]:
         "git_diff",
         "git_log",
         "search_code",
+        "complete_task",
     ]
 
 
@@ -892,6 +988,35 @@ def run_git(args: list[str], timeout: float = DEFAULT_TIMEOUT_S) -> str:
     if result.returncode != 0:
         raise ToolError(render_command_failure(result))
     return result.stdout
+
+
+def looks_dangerous_command(cmd: str) -> bool:
+    lowered = re.sub(r"\s+", " ", cmd.strip().lower())
+    patterns = (
+        r"\brm\s+(-[a-z]*r[a-z]*f|-rf|-fr)\b",
+        r"\bgit\s+reset\s+--hard\b",
+        r"\bgit\s+clean\s+(-[a-z]*f|-[a-z]*x|-[a-z]*d)",
+        r"\bgit\s+checkout\s+--\b",
+        r"\bsudo\b",
+        r"\bdd\s+.*\bof=",
+        r"\bmkfs(\.| )",
+        r"\bcurl\b.*\|\s*(sh|bash)\b",
+        r"\bwget\b.*\|\s*(sh|bash)\b",
+    )
+    return any(re.search(pattern, lowered) for pattern in patterns)
+
+
+def unified_diff(path: str, before: str, after: str) -> str:
+    import difflib
+
+    return "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+        )
+    )
 
 
 def workspace_path(path: str) -> Path:
@@ -926,6 +1051,30 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "read_file",
         "description": "Read a UTF-8 text file from the mounted workspace.",
         "parameters": {"path": "workspace-relative path", "max_bytes": "optional byte cap"},
+    },
+    {
+        "name": "propose_file_change",
+        "description": "Queue a file change and return a diff for review before applying.",
+        "parameters": {
+            "path": "workspace-relative path",
+            "content": "proposed full file content",
+            "reason": "optional reason for the proposal",
+        },
+    },
+    {
+        "name": "list_pending_changes",
+        "description": "List queued file-change proposals with diffs.",
+        "parameters": {},
+    },
+    {
+        "name": "apply_pending_change",
+        "description": "Apply one queued file-change proposal after approval.",
+        "parameters": {"change_id": "pending change id"},
+    },
+    {
+        "name": "clear_pending_changes",
+        "description": "Discard all queued file-change proposals.",
+        "parameters": {},
     },
     {
         "name": "read_file_slice",
@@ -1015,5 +1164,14 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "name": "search_code",
         "description": "Search workspace text with ripgrep.",
         "parameters": {"pattern": "regex pattern", "path": "optional path", "max_count": "cap"},
+    },
+    {
+        "name": "complete_task",
+        "description": "Signal that the requested task is complete, partial, or blocked.",
+        "parameters": {
+            "summary": "user-facing summary",
+            "status": "success, partial, or blocked",
+            "verification": "optional verification evidence",
+        },
     },
 ]

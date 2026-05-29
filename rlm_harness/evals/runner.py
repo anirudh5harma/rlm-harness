@@ -11,6 +11,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Protocol
 
+from rlm_harness.memory import Memory
+from rlm_harness.memory.evolution import EvolutionProposal, EvolutionProposalStore
+from rlm_harness.memory.profile import TasteProfileStore, TasteRecord
+
 
 @dataclass
 class GradeResult:
@@ -53,6 +57,10 @@ class EvalCase:
     grader: Grader
     setup_commands: list[str] = field(default_factory=list)
     files: dict[str, str] = field(default_factory=dict)
+    taste_records: list[dict] = field(default_factory=list)
+    evolution_proposals: list[dict] = field(default_factory=list)
+    output_contains: list[str] = field(default_factory=list)
+    output_not_contains: list[str] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
 
 
@@ -136,6 +144,8 @@ class EvalRunner:
 
     def run_case(self, case: EvalCase) -> EvalResult:
         workspace = Path(case.workspace)
+        profile_db = workspace / ".rlm_harness" / "profile.db"
+        memory_db = workspace / ".rlm_harness" / "memory.db"
         started_at = utc_now_iso()
         started = time.perf_counter()
         harness_stdout = ""
@@ -143,8 +153,16 @@ class EvalRunner:
         status = "ok"
         try:
             self.prepare_workspace(case)
+            self.prepare_case_memory(case, profile_db, memory_db)
             completed = subprocess.run(
-                [*self.harness_command, case.prompt],
+                [
+                    *self.harness_command,
+                    "--memory-db",
+                    str(memory_db),
+                    "--profile-db",
+                    str(profile_db),
+                    case.prompt,
+                ],
                 cwd=workspace,
                 text=True,
                 capture_output=True,
@@ -153,9 +171,19 @@ class EvalRunner:
             )
             harness_stdout = completed.stdout
             harness_stderr = completed.stderr
+            harness_grade = GradeResult(True, 1.0, "")
             if completed.returncode != 0:
                 status = "harness_error"
-            grade = case.grader.grade(workspace)
+                harness_grade = GradeResult(
+                    False,
+                    0.0,
+                    f"harness exited with {completed.returncode}",
+                )
+            grade = combine_grades(
+                harness_grade,
+                case.grader.grade(workspace),
+                grade_output_expectations(case, harness_stdout, harness_stderr),
+            )
         except subprocess.TimeoutExpired as exc:
             status = "timeout"
             grade = GradeResult(False, 0.0, (exc.stdout or "") + (exc.stderr or ""))
@@ -199,6 +227,80 @@ class EvalRunner:
                 raise RuntimeError(
                     f"setup failed for {case.id}: {command}\n{completed.stdout}{completed.stderr}"
                 )
+
+    def prepare_case_memory(
+        self,
+        case: EvalCase,
+        profile_db: Path,
+        memory_db: Path,
+    ) -> None:
+        profile_db.parent.mkdir(parents=True, exist_ok=True)
+        with Memory(profile_db) as profile_memory:
+            store = TasteProfileStore(profile_memory)
+            for raw in case.taste_records:
+                store.add(
+                    TasteRecord.create(
+                        scope=str(raw.get("scope", "user")),
+                        kind=str(raw.get("kind", "preference")),
+                        text=str(raw["text"]),
+                        confidence=float(raw.get("confidence", 0.95)),
+                        status=str(raw.get("status", "active")),
+                        evidence={"source": "eval", "case_id": case.id},
+                    )
+                )
+            evolution_store = EvolutionProposalStore(profile_memory)
+            for raw in case.evolution_proposals:
+                if str(raw.get("scope", "user")) != "user":
+                    continue
+                evolution_store.add(proposal_from_eval(case, raw))
+
+        with Memory(memory_db) as project_memory:
+            evolution_store = EvolutionProposalStore(project_memory)
+            for raw in case.evolution_proposals:
+                if str(raw.get("scope", "user")) == "user":
+                    continue
+                evolution_store.add(proposal_from_eval(case, raw))
+
+
+def proposal_from_eval(case: EvalCase, raw: dict) -> EvolutionProposal:
+    return EvolutionProposal.create(
+        scope=str(raw.get("scope", "user")),
+        kind=str(raw.get("kind", "prompt_rule")),
+        title=str(raw["title"]),
+        body=str(raw["body"]),
+        rationale=str(raw.get("rationale", f"Seeded by eval case {case.id}.")),
+        status=str(raw.get("status", "approved")),
+        evidence={"source": "eval", "case_id": case.id},
+    )
+
+
+def grade_output_expectations(
+    case: EvalCase,
+    harness_stdout: str,
+    harness_stderr: str,
+) -> GradeResult:
+    combined = harness_stdout + harness_stderr
+    normalized = combined.lower()
+    failures = []
+    for expected in case.output_contains:
+        if expected.lower() not in normalized:
+            failures.append(f"missing expected output: {expected}")
+    for forbidden in case.output_not_contains:
+        if forbidden.lower() in normalized:
+            failures.append(f"forbidden output present: {forbidden}")
+    if failures:
+        return GradeResult(False, 0.0, "\n".join(failures))
+    if case.output_contains or case.output_not_contains:
+        return GradeResult(True, 1.0, "output expectations passed")
+    return GradeResult(True, 1.0, "")
+
+
+def combine_grades(*grades: GradeResult) -> GradeResult:
+    failures = [grade for grade in grades if not grade.passed]
+    output = "\n".join(grade.output for grade in grades if grade.output)
+    if failures:
+        return GradeResult(False, min(grade.score for grade in grades), output)
+    return GradeResult(True, min(grade.score for grade in grades), output)
 
 
 def utc_now_iso() -> str:

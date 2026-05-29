@@ -35,7 +35,7 @@ class RLMRuntimeTests(unittest.TestCase):
         text = (
             "before\n```repl\na = 1\n```\nmiddle\n```python\nignored\n```\n```repl\nprint(a)\n```"
         )
-        self.assertEqual(find_repl_blocks(text), ["a = 1", "print(a)"])
+        self.assertEqual(find_repl_blocks(text), ["a = 1", "ignored", "print(a)"])
 
     def test_runtime_iterates_until_answer_ready(self):
         client = ScriptedRuntimeClient(

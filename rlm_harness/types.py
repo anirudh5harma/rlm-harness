@@ -52,7 +52,10 @@ class TaskPlan(BaseModel):
         return len(self.steps)
 
     def has_more(self) -> bool:
-        return any(s.status in (PlanStepStatus.PENDING, PlanStepStatus.IN_PROGRESS) for s in self.steps)
+        return any(
+            s.status in (PlanStepStatus.PENDING, PlanStepStatus.IN_PROGRESS)
+            for s in self.steps
+        )
 
     @classmethod
     def from_flat_steps(cls, descriptions: list[str]) -> TaskPlan:

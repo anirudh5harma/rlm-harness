@@ -20,7 +20,10 @@ from rlm_harness.sandbox import (
 from rlm_harness.sandbox.types import ExecutionResult
 from rlm_harness.types import Msg
 
-REPL_BLOCK_RE = re.compile(r"```repl\s*\n(.*?)\n```", re.DOTALL | re.IGNORECASE)
+REPL_BLOCK_RE = re.compile(
+    r"```(?:repl|python)\s*\n(.*?)\n```",
+    re.DOTALL | re.IGNORECASE,
+)
 MAX_OBSERVATION_CODE_CHARS = 8_000
 MAX_OBSERVATION_STREAM_CHARS = 12_000
 
@@ -60,6 +63,7 @@ class LocalRLMRepl:
             "llm_query_batched": self.llm_query_batched,
             "rlm_query": self.rlm_query,
             "rlm_query_batched": self.rlm_query_batched,
+            "complete_task": self.complete_task,
         }
 
     def execute(self, code: str) -> RLMObservation:
@@ -103,6 +107,26 @@ class LocalRLMRepl:
             if k not in ignored and not k.startswith("__")
         }
         return json.dumps(visible, sort_keys=True)
+
+    def complete_task(
+        self,
+        summary: str,
+        status: str = "success",
+        verification: Optional[str] = None,
+    ) -> dict[str, str | bool]:
+        if status not in {"success", "partial", "blocked"}:
+            raise ValueError("status must be success, partial, or blocked")
+        answer = self.namespace["answer"]
+        answer["content"] = summary
+        answer["ready"] = True
+        answer["status"] = status
+        answer["verification"] = verification or ""
+        return {
+            "summary": summary,
+            "status": status,
+            "verification": verification or "",
+            "should_continue": False,
+        }
 
     def llm_query(
         self,
@@ -406,15 +430,17 @@ The REPL contains:
 - answer
 - llm_query / llm_query_batched
 - rlm_query / rlm_query_batched
+- complete_task(summary, status='success', verification=None)
 - SHOW_VARS
 - When running in the sandbox, workspace tools such as project_summary, project_audit,
   project_overview, list_files, read_file, read_file_slice, chunk_file, search_code,
-  run_shell, and git_status
+  propose_file_change, list_pending_changes, apply_pending_change,
+  clear_pending_changes, run_shell, and git_status
 
 Inspect context programmatically. Set answer['content'] and answer['ready'] = True
-when done. If you have enough information to answer after seeing observations,
-reply with the final user-facing answer in plain text and do not include another
-```repl block.
+when done, or call complete_task(summary, status, verification). If you have
+enough information to answer after seeing observations, reply with the final
+user-facing answer in plain text and do not include another ```repl block.
 
 In Docker, the workspace is mounted at /workspace. Do not use host absolute paths
 such as /Users/... inside REPL code. Prefer the workspace tools with relative
@@ -427,6 +453,10 @@ with read_file_slice/chunk_file and ask llm_query/rlm_query focused sub-question
 then synthesize and verify.
 For code-editing tasks, inspect before editing, make minimal changes, run focused
 verification when possible, and report changed files plus verification results.
+For risky edits, dependency changes, prompt/policy changes, or changes outside
+the user's apparent request, use propose_file_change() and show the pending diff
+instead of applying silently. Destructive shell commands are blocked unless the
+user has explicitly approved them.
 
 For project identity or overview questions such as "what is this project", call
 project_summary() when it is available and return that summary. Do not answer by
@@ -494,6 +524,15 @@ def build_bootstrap_code(context: Any) -> str:
         "def _emit_answer_if_ready():\n"
         "    if isinstance(answer, dict) and answer.get('ready'):\n"
         "        print('__RLM_FINAL_ANSWER__' + json.dumps(str(answer.get('content', ''))))\n"
+        "def complete_task(summary, status='success', verification=None):\n"
+        "    if status not in {'success', 'partial', 'blocked'}:\n"
+        "        raise ValueError('status must be success, partial, or blocked')\n"
+        "    answer['content'] = str(summary)\n"
+        "    answer['ready'] = True\n"
+        "    answer['status'] = status\n"
+        "    answer['verification'] = verification or ''\n"
+        "    return {'summary': str(summary), 'status': status, "
+        "'verification': verification or '', 'should_continue': False}\n"
     )
 
 

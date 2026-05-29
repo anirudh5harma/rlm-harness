@@ -4,12 +4,10 @@ import json
 import subprocess
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
 from rlm_harness.memory.store import Memory
 from rlm_harness.types import HarnessState, TaskPlan
-
 
 CHECKPOINT_KIND = "plan_checkpoint"
 

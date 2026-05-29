@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Optional
 
+from rlm_harness.graph.task_policy import normalize_task_text
 from rlm_harness.observability import maybe_traceable
 from rlm_harness.types import Completion, Msg
 
@@ -101,19 +102,19 @@ class LMClient:
                 "python -m unittest\\n' + output\n"
                 "answer['ready'] = True"
             )
-        elif is_project_summary_prompt(lower):
-            code = (
-                "summary = project_summary()\n"
-                "answer['content'] = summary\n"
-                "answer['ready'] = True\n"
-                "print(summary)"
-            )
         elif is_project_audit_prompt(lower):
             code = (
                 "audit = project_audit()\n"
                 "answer['content'] = audit\n"
                 "answer['ready'] = True\n"
                 "print(audit)"
+            )
+        elif is_project_summary_prompt(lower):
+            code = (
+                "summary = project_summary()\n"
+                "answer['content'] = summary\n"
+                "answer['ready'] = True\n"
+                "print(summary)"
             )
         elif "summarize" in lower or "summary" in lower or "explain" in lower:
             code = (
@@ -123,9 +124,9 @@ class LMClient:
                 "print(answer['content'])"
             )
         else:
-            escaped = user_text.replace("\\", "\\\\").replace("'", "\\'")
+            content = f"Stub RLM completed task: {user_text[:160]}"
             code = (
-                f"answer['content'] = 'Stub RLM completed task: {escaped[:160]}'; "
+                f"answer['content'] = {content!r}; "
                 "answer['ready'] = True; "
                 "print(answer['content'])"
             )
@@ -133,9 +134,7 @@ class LMClient:
 
     def _stub_action(self, user_text: str) -> str:
         lower = user_text.lower()
-        if is_project_summary_prompt(lower):
-            code = "print(project_summary())"
-        elif is_project_audit_prompt(lower):
+        if is_project_audit_prompt(lower):
             code = (
                 "baseline = project_audit()\n"
                 "try:\n"
@@ -149,6 +148,8 @@ class LMClient:
                 "except Exception:\n"
                 "    print(baseline)"
             )
+        elif is_project_summary_prompt(lower):
+            code = "print(project_summary())"
         elif "list files" in lower or "list the files" in lower:
             code = (
                 "result = run_shell('find . -maxdepth 1 -mindepth 1 | sort')\n"
@@ -174,8 +175,8 @@ class LMClient:
                 "print(answer)"
             )
         else:
-            escaped = user_text.replace("\\", "\\\\").replace("'", "\\'")
-            code = f"print('Stub action completed for task: {escaped[:200]}')"
+            content = f"Stub action completed for task: {user_text[:200]}"
+            code = f"print({content!r})"
         return json.dumps({"type": "python", "code": code}, sort_keys=True)
 
     @staticmethod
@@ -245,6 +246,7 @@ class LMClient:
 
 
 def is_project_summary_prompt(lowered_user_text: str) -> bool:
+    lowered_user_text = normalize_task_text(lowered_user_text)
     return (
         bool(
             re.search(
@@ -269,6 +271,7 @@ def is_project_summary_prompt(lowered_user_text: str) -> bool:
 
 
 def is_project_audit_prompt(lowered_user_text: str) -> bool:
+    lowered_user_text = normalize_task_text(lowered_user_text)
     return (
         bool(
             re.search(
@@ -302,6 +305,12 @@ def is_project_audit_prompt(lowered_user_text: str) -> bool:
                 "assess",
                 "find any",
                 "identify",
+                "what must be done",
+                "what should be done",
+                "what to do next",
+                "next step",
+                "next steps",
+                "done next",
             )
         )
     )

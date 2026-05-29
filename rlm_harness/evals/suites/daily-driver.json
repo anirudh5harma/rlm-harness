@@ -1,0 +1,72 @@
+{
+  "name": "daily-driver",
+  "cases": [
+    {
+      "id": "fix-python-unittest",
+      "prompt": "Fix the failing test in mathlib.py and report what changed.",
+      "test_command": "python -m unittest",
+      "files": {
+        "mathlib.py": "def add(a, b):\n    return a - b\n",
+        "test_mathlib.py": "import unittest\n\nfrom mathlib import add\n\n\nclass MathTests(unittest.TestCase):\n    def test_adds_numbers(self):\n        self.assertEqual(add(2, 3), 5)\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n"
+      },
+      "output_contains": [
+        "Verification",
+        "OK"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__"
+      ]
+    },
+    {
+      "id": "list-workspace-files",
+      "prompt": "List files in workspace.",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "files": {
+        "alpha.txt": "alpha\n",
+        "beta.txt": "beta\n"
+      },
+      "output_contains": [
+        "alpha.txt",
+        "beta.txt"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__"
+      ]
+    },
+    {
+      "id": "summary-with-learned-style",
+      "prompt": "Summarize this project.",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "taste_records": [
+        {
+          "scope": "user",
+          "kind": "preference",
+          "text": "Prefer concise project summaries.",
+          "confidence": 0.95,
+          "status": "active"
+        }
+      ],
+      "evolution_proposals": [
+        {
+          "scope": "user",
+          "kind": "prompt_rule",
+          "title": "Concise project summaries",
+          "body": "Prefer concise project summaries.",
+          "rationale": "Seeded by the daily-driver eval suite.",
+          "status": "approved"
+        }
+      ],
+      "files": {
+        "README.md": "# Inventory Tool\n\nSmall Python project for tracking warehouse inventory.\n",
+        "pyproject.toml": "[project]\nname = \"inventory-tool\"\nversion = \"0.1.0\"\n"
+      },
+      "output_contains": [
+        "Project Summary",
+        "inventory-tool"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__"
+      ]
+    }
+  ]
+}

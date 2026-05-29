@@ -1,3 +1,4 @@
+import io
 import subprocess
 import tempfile
 import unittest
@@ -26,6 +27,39 @@ def docker_available():
 
 
 class DockerREPLConfigTests(unittest.TestCase):
+    def test_start_retries_after_docker_desktop_missing_bind_source(self):
+        class ExitedProcess:
+            stderr = io.StringIO(
+                'docker: Error response from daemon: invalid mount config for type "bind": '
+                "bind source path does not exist: /host_mnt/tmp/workspace\n"
+            )
+
+            def poll(self):
+                return 1
+
+        class RunningProcess:
+            stdin = None
+            stdout = None
+            stderr = io.StringIO("")
+
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "subprocess.Popen", side_effect=[ExitedProcess(), RunningProcess()]
+        ) as popen, patch(
+            "subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")
+        ) as run:
+            repl = DockerREPL(SandboxConfig(workspace=Path(temp_dir)))
+
+            repl.start()
+
+        self.assertEqual(popen.call_count, 2)
+        self.assertEqual(run.call_count, 1)
+        self.assertTrue(
+            any(str(Path(temp_dir).resolve().parent) in arg for arg in run.call_args.args[0])
+        )
+
     def test_start_reports_missing_docker_cli_cleanly(self):
         with tempfile.TemporaryDirectory() as temp_dir, patch(
             "subprocess.Popen", side_effect=FileNotFoundError("docker")
@@ -104,6 +138,42 @@ class DockerREPLConfigTests(unittest.TestCase):
         self.assertTrue(slice_payload["truncated"])
         self.assertEqual([chunk["index"] for chunk in chunks], [0, 1, 2])
         self.assertEqual(chunks[0]["content"], "012345678901")
+
+    def test_proposal_tools_queue_diff_and_apply_after_approval(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir).resolve()
+            (workspace / "app.py").write_text("print('old')\n", encoding="utf-8")
+            old_workspace = sandbox_tools.WORKSPACE
+            sandbox_tools.WORKSPACE = workspace
+            try:
+                sandbox_tools.clear_pending_changes()
+                proposal = sandbox_tools.propose_file_change(
+                    "app.py",
+                    "print('new')\n",
+                    reason="example",
+                )
+                pending = sandbox_tools.list_pending_changes()
+                result = sandbox_tools.apply_pending_change(proposal["id"])
+                written = (workspace / "app.py").read_text(encoding="utf-8")
+            finally:
+                sandbox_tools.clear_pending_changes()
+                sandbox_tools.WORKSPACE = old_workspace
+
+        self.assertTrue(proposal["approval_required"])
+        self.assertIn("-print('old')", proposal["diff"])
+        self.assertEqual(pending[0]["id"], proposal["id"])
+        self.assertIn("wrote app.py", result)
+        self.assertEqual(written, "print('new')\n")
+
+    def test_run_shell_blocks_destructive_commands_without_approval(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_workspace = sandbox_tools.WORKSPACE
+            sandbox_tools.WORKSPACE = Path(temp_dir).resolve()
+            try:
+                with self.assertRaisesRegex(sandbox_tools.ToolError, "destructive"):
+                    sandbox_tools.run_shell("rm -rf .")
+            finally:
+                sandbox_tools.WORKSPACE = old_workspace
 
 
 @unittest.skipUnless(docker_available(), "Docker daemon is not available")

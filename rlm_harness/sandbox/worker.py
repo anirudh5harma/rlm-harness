@@ -12,19 +12,25 @@ from rlm_shim import RLMBridge
 from sandbox_tools import (
     ToolError,
     apply_patch,
+    apply_pending_change,
     chunk_file,
+    clear_pending_changes,
+    complete_task,
     git_diff,
     git_log,
     git_status,
     list_files,
+    list_pending_changes,
     project_audit,
     project_overview,
     project_summary,
+    propose_file_change,
     read_file,
     read_file_slice,
     read_first_existing,
     run_shell,
     search_code,
+    set_completion_sink,
     tool_help,
     tool_names,
     write_file,
@@ -100,6 +106,10 @@ def main() -> int:
         "project_overview": project_overview,
         "project_summary": project_summary,
         "project_audit": project_audit,
+        "propose_file_change": propose_file_change,
+        "list_pending_changes": list_pending_changes,
+        "apply_pending_change": apply_pending_change,
+        "clear_pending_changes": clear_pending_changes,
         "write_file": write_file,
         "apply_patch": apply_patch,
         "run_shell": run_shell,
@@ -107,9 +117,20 @@ def main() -> int:
         "git_diff": git_diff,
         "git_log": git_log,
         "search_code": search_code,
+        "complete_task": complete_task,
         "tool_help": tool_help,
         "tool_names": tool_names,
     }
+
+    def _completion_sink(payload: dict) -> None:
+        namespace["answer"] = {
+            "content": payload["summary"],
+            "ready": True,
+            "status": payload["status"],
+            "verification": payload.get("verification", ""),
+        }
+
+    set_completion_sink(_completion_sink)
     for raw_line in sys.stdin:
         try:
             request = json.loads(raw_line)

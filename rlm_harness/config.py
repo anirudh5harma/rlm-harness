@@ -127,6 +127,10 @@ def default_memory_path() -> Path:
     return Path(os.environ.get("RLM_HARNESS_MEMORY_DB", ".rlm_harness/memory.db"))
 
 
+def default_profile_path() -> Path:
+    return Path(os.environ.get("RLM_HARNESS_PROFILE_DB", CONFIG_DIR / "profile.db"))
+
+
 def masked_secret(value: Optional[str]) -> str:
     if not value:
         return "not set"

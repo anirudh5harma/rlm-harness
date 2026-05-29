@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import ast
+from importlib import resources
 from pathlib import Path
+from typing import Any
 
 from rlm_harness.evals.runner import EvalCase, EvalSuite, UnitTestGrader
+
+BUILTIN_SUITES = {"daily-driver", "taste-regression"}
 
 
 class EvalSuiteFileLoader:
     """Load local deterministic Harness eval suites from JSON or simple YAML."""
 
-    def load_suite(self, path: Path, work_root: Path) -> EvalSuite:
-        text = path.read_text(encoding="utf-8")
+    def load_suite(self, path: Path | str, work_root: Path) -> EvalSuite:
+        text = read_suite_text(path)
         data = parse_simple_suite(text)
         cases = []
         for raw in data.get("cases", []):
@@ -23,14 +27,51 @@ class EvalSuiteFileLoader:
                     workspace=work_root / case_id,
                     files={str(k): str(v) for k, v in raw.get("files", {}).items()},
                     setup_commands=[str(cmd) for cmd in raw.get("setup_commands", [])],
+                    taste_records=[dict(item) for item in raw.get("taste_records", [])],
+                    evolution_proposals=[
+                        dict(item) for item in raw.get("evolution_proposals", [])
+                    ],
+                    output_contains=[str(item) for item in raw.get("output_contains", [])],
+                    output_not_contains=[
+                        str(item) for item in raw.get("output_not_contains", [])
+                    ],
                     grader=UnitTestGrader(str(raw.get("test_command", "python -m unittest"))),
                     metadata={"eval_type": "suite", "prompt": prompt},
                 )
             )
-        return EvalSuite(name=str(data.get("name", path.stem)), cases=cases)
+        fallback_name = normalize_builtin_suite_name(str(path))
+        return EvalSuite(name=str(data.get("name", fallback_name)), cases=cases)
 
 
-def parse_simple_suite(text: str) -> dict:
+def read_suite_text(path: Path | str) -> str:
+    path_or_name = str(path)
+    candidate = Path(path_or_name)
+    if candidate.exists():
+        return candidate.read_text(encoding="utf-8")
+
+    suite_name = normalize_builtin_suite_name(path_or_name)
+    if suite_name in BUILTIN_SUITES:
+        return (
+            resources.files("rlm_harness.evals.suites")
+            .joinpath(f"{suite_name}.json")
+            .read_text(encoding="utf-8")
+        )
+
+    raise FileNotFoundError(
+        f"eval suite not found: {path_or_name}. "
+        f"Built-in suites: {', '.join(sorted(BUILTIN_SUITES))}"
+    )
+
+
+def normalize_builtin_suite_name(value: str) -> str:
+    name = Path(value).name
+    for suffix in (".json", ".yaml", ".yml"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+    return name.strip().lower()
+
+
+def parse_simple_suite(text: str) -> dict[str, Any]:
     stripped = text.strip()
     if stripped.startswith("{"):
         import json
@@ -71,7 +112,7 @@ def parse_simple_suite(text: str) -> dict:
     return result
 
 
-def parse_scalar(value: str):
+def parse_scalar(value: str) -> Any:
     value = value.strip()
     if not value:
         return ""

@@ -1,0 +1,39 @@
+{
+  "name": "taste-regression",
+  "cases": [
+    {
+      "id": "concise-final-answer",
+      "prompt": "Summarize this project and include verification status.",
+      "test_command": "python -c \"print('workspace ok')\"",
+      "taste_records": [
+        {
+          "scope": "user",
+          "kind": "preference",
+          "text": "Prefer concise final answers with a clear verification line.",
+          "confidence": 0.95,
+          "status": "active"
+        }
+      ],
+      "evolution_proposals": [
+        {
+          "scope": "user",
+          "kind": "prompt_rule",
+          "title": "Concise final answers",
+          "body": "Prefer concise final answers with a clear verification line.",
+          "rationale": "Seeded by the taste regression suite.",
+          "status": "approved"
+        }
+      ],
+      "files": {
+        "README.md": "# Demo Project\n\nA tiny demo project for Harness taste regression.\n",
+        "pyproject.toml": "[project]\nname = \"demo\"\nversion = \"0.1.0\"\n"
+      },
+      "output_contains": [
+        "verification"
+      ],
+      "output_not_contains": [
+        "__RLM_FINAL_ANSWER__"
+      ]
+    }
+  ]
+}
