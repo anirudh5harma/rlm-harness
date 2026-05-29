@@ -218,6 +218,48 @@ class DockerREPLConfigTests(unittest.TestCase):
         self.assertNotIn("Files inspected", summary)
         self.assertNotIn("Working tree:", summary)
 
+    def test_project_summary_uses_readme_title_for_cargo_workspace(self):
+        summary = sandbox_tools.render_project_overview_summary(
+            {
+                "files": [
+                    "README.md",
+                    "Cargo.toml",
+                    "crates/sansara-cli/src/main.rs",
+                ],
+                "documents": [
+                    {
+                        "path": "README.md",
+                        "content": (
+                            "# Sansara\n\n"
+                            "[![skills.sh](https://skills.sh/b/a3fckx/sansara)]"
+                            "(https://skills.sh/b/a3fckx/sansara)\n\n"
+                            "Vault-native autonomous agent OS: a **flat wiki** "
+                            "Obsidian vault is the world model. **Canonical docs.**\n"
+                        ),
+                    },
+                    {
+                        "path": "Cargo.toml",
+                        "content": (
+                            "[workspace]\n"
+                            'members = ["crates/sansara-cli"]\n'
+                            "resolver = \"2\"\n\n"
+                            "[workspace.package]\n"
+                            "version = \"0.2.0\"\n"
+                            "edition = \"2021\"\n"
+                        ),
+                    },
+                ],
+                "git_status": "",
+                "git_log": "",
+            }
+        )
+
+        self.assertIn("Sansara is vault-native autonomous agent OS", summary)
+        self.assertIn("It appears to use Rust.", summary)
+        self.assertIn("cargo test", summary)
+        self.assertNotIn("**", summary)
+        self.assertNotIn("skills.sh", summary)
+
 
 @unittest.skipUnless(docker_available(), "Docker daemon is not available")
 class DockerREPLTests(unittest.TestCase):

@@ -26,6 +26,7 @@ from rlm_harness.graph.task_policy import (
     is_project_summary_task,
     looks_like_code_edit_result,
     looks_like_file_inventory,
+    looks_like_legacy_project_summary,
     looks_like_project_audit,
     looks_like_project_summary,
     looks_like_source_dump,
@@ -1180,10 +1181,16 @@ class Nodes:
         last_action = state.scratch.get("last_action", "")
         if not last_action and state.history:
             last_action = state.history[-1].get("content", "")
-        state.final_answer = build_final_answer(
+        final_answer = build_final_answer(
             last_action,
             task=state.task,
             verification=state.scratch.get("verification_result"),
+        )
+        state.final_answer = fallback_project_answer_if_needed(
+            state.task,
+            final_answer,
+            Path(state.workspace),
+            state.status,
         )
         self.traces.event(
             state.run_id,
@@ -1352,6 +1359,7 @@ def looks_like_project_summary_answer(answer: str) -> bool:
     return (
         bool(answer.strip())
         and looks_like_project_summary(answer)
+        and not looks_like_legacy_project_summary(answer)
         and not looks_like_file_inventory(answer)
         and not looks_like_source_dump(answer)
     )

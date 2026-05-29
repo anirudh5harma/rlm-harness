@@ -68,6 +68,9 @@
       "output_not_contains": [
         "__RLM_FINAL_ANSWER__",
         "Files inspected",
+        "Key config/docs",
+        "Recent commits",
+        "Notable source files",
         "Working tree:"
       ]
     }

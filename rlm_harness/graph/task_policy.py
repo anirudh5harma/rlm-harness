@@ -229,11 +229,45 @@ def looks_like_file_inventory(output: str) -> bool:
 
 
 def looks_like_project_summary(output: str) -> bool:
+    if looks_like_legacy_project_summary(output) or looks_like_project_summary_markup_noise(
+        output
+    ):
+        return False
     lowered = output.lower()
     return (
         "project summary" in lowered
-        or "what it is:" in lowered
-        or ("tech stack:" in lowered and "files inspected:" in lowered)
+        and (
+            "i would orient around" in lowered
+            or "what i would do next" in lowered
+            or "verification i would run" in lowered
+            or "it appears to use" in lowered
+        )
+    )
+
+
+def looks_like_legacy_project_summary(output: str) -> bool:
+    lowered = output.lower()
+    legacy_markers = (
+        "what it is:",
+        "files inspected:",
+        "key config/docs:",
+        "working tree:",
+        "recent commits:",
+        "notable source files:",
+    )
+    marker_count = sum(1 for marker in legacy_markers if marker in lowered)
+    return marker_count >= 2 or (
+        "project summary" in lowered and "files inspected:" in lowered
+    )
+
+
+def looks_like_project_summary_markup_noise(output: str) -> bool:
+    lowered = output.lower()
+    return (
+        "skills.sh" in lowered
+        or "[![" in output
+        or "**" in output
+        or bool(re.search(r"\[[^\]]+\]\([^)]*\)", output))
     )
 
 

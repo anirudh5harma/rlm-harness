@@ -303,7 +303,7 @@ def render_project_overview_summary(payload: dict) -> str:
     dependencies = package_dependencies(package)
 
     sections = ["Project Summary"]
-    name = project_name(package, pyproject, cargo)
+    name = project_name(package, pyproject, cargo, documents)
     description = project_description(package, pyproject, cargo, documents)
     stack = infer_project_stack(files, documents, dependencies, cargo)
     architecture = infer_project_architecture(files)
@@ -680,7 +680,7 @@ def audit_verification_commands(
                 commands.append(f"npm run {name}")
     if "pyproject.toml" in files and any(path.startswith("tests/") for path in files):
         commands.append("pytest")
-    if cargo and "Cargo.toml" in files:
+    if "Cargo.toml" in files:
         commands.append("cargo test")
     return commands
 
@@ -706,7 +706,18 @@ def pyproject_from_documents(documents: list[dict]) -> dict:
 def cargo_package_from_documents(documents: list[dict]) -> dict:
     for doc in documents:
         if doc.get("path") == "Cargo.toml" and isinstance(doc.get("content"), str):
-            return parse_toml_section(str(doc["content"]), "package")
+            content = str(doc["content"])
+            package = parse_toml_section(content, "package")
+            if package:
+                return package
+            workspace = parse_toml_section(content, "workspace")
+            workspace_package = parse_toml_section(content, "workspace.package")
+            cargo: dict[str, object] = {}
+            if workspace:
+                cargo["workspace"] = True
+            if workspace_package:
+                cargo["workspace_package"] = workspace_package
+            return cargo
     return {}
 
 
@@ -755,7 +766,12 @@ def parse_toml_section(content: str, section_name: str) -> dict:
             payload = tomllib.loads(content)
         except ValueError:
             payload = {}
-        section = payload.get(section_name) if isinstance(payload, dict) else None
+        section = payload if isinstance(payload, dict) else None
+        for part in section_name.split("."):
+            if not isinstance(section, dict):
+                section = None
+                break
+            section = section.get(part)
         return section if isinstance(section, dict) else {}
 
     metadata: dict[str, str] = {}
@@ -777,11 +793,19 @@ def parse_toml_section(content: str, section_name: str) -> dict:
     return metadata
 
 
-def project_name(package: dict, pyproject: dict, cargo: dict | None = None) -> str:
+def project_name(
+    package: dict,
+    pyproject: dict,
+    cargo: dict | None = None,
+    documents: list[dict] | None = None,
+) -> str:
     for payload in (package, pyproject, cargo or {}):
         name = payload.get("name") if isinstance(payload, dict) else None
         if isinstance(name, str) and name.strip():
             return name.strip()
+    readme_title = readme_title_from_documents(documents or [])
+    if readme_title:
+        return readme_title
     return ""
 
 
@@ -808,6 +832,18 @@ def readme_content_from_documents(documents: list[dict]) -> str:
         content = doc.get("content")
         if path.startswith("readme") and isinstance(content, str):
             return content
+    return ""
+
+
+def readme_title_from_documents(documents: list[dict]) -> str:
+    readme = readme_content_from_documents(documents)
+    if not readme:
+        return ""
+    for raw_line in readme.splitlines():
+        line = raw_line.strip()
+        if line.startswith("# "):
+            title = clean_markdown_inline(line.lstrip("#").strip())
+            return title if title and not is_readme_noise_line(title) else ""
     return ""
 
 
@@ -853,6 +889,8 @@ def clean_markdown_inline(text: str) -> str:
     cleaned = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
     cleaned = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", cleaned)
     cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+    cleaned = re.sub(r"(\*\*|__)(.*?)\1", r"\2", cleaned)
+    cleaned = re.sub(r"(?<!\w)(\*|_)([^*_]+)\1(?!\w)", r"\2", cleaned)
     cleaned = re.sub(r"<[^>]+>", "", cleaned)
     cleaned = cleaned.strip("#*-_ \t")
     return re.sub(r"\s+", " ", cleaned).strip()
