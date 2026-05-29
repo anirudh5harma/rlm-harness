@@ -26,6 +26,7 @@ from rlm_harness.graph.task_policy import (
     is_project_summary_task,
     looks_like_code_edit_result,
     looks_like_file_inventory,
+    looks_like_legacy_project_summary,
     looks_like_project_audit,
     looks_like_project_summary,
     looks_like_source_dump,
@@ -570,6 +571,9 @@ class Nodes:
                     "The Python code must perform the requested work immediately at top level; "
                     "do not only define unused functions, classes, or data structures. "
                     "Only call the listed tool functions; do not invent helper APIs. "
+                    "Write user-facing output in plain, friendly English. Do not expose "
+                    "internal metrics, raw JSON, giant file lists, or git noise unless the "
+                    "user explicitly asks for those details. "
                     "README.md is optional; never assume it exists. For project summaries, "
                     "especially questions like 'what is this project', call project_summary() "
                     "and print only that user-facing summary. If you need more detail, call "
@@ -588,9 +592,10 @@ class Nodes:
                     "or 'src/app.py'. If you do not know the path, discover it first with "
                     "project_overview(), list_files(), or search_code. "
                     "For informational tasks, inspect the workspace and print the final "
-                    "user-facing answer to stdout. For code-editing tasks, make the change, "
-                    "run focused verification when possible, and print the changed files and "
-                    "verification result. "
+                    "user-facing answer to stdout with the concrete next step when useful. "
+                    "For code-editing tasks, inspect the relevant files first, make the "
+                    "smallest correct edit, run focused verification when possible, and "
+                    "summarize the changed files and verification result in friendly English. "
                     "For risky edits, dependency changes, prompt/policy changes, or changes "
                     "outside the user's apparent request, use propose_file_change() and show "
                     "the pending diff instead of applying silently. Destructive shell commands "
@@ -1176,10 +1181,16 @@ class Nodes:
         last_action = state.scratch.get("last_action", "")
         if not last_action and state.history:
             last_action = state.history[-1].get("content", "")
-        state.final_answer = build_final_answer(
+        final_answer = build_final_answer(
             last_action,
             task=state.task,
             verification=state.scratch.get("verification_result"),
+        )
+        state.final_answer = fallback_project_answer_if_needed(
+            state.task,
+            final_answer,
+            Path(state.workspace),
+            state.status,
         )
         self.traces.event(
             state.run_id,
@@ -1348,6 +1359,7 @@ def looks_like_project_summary_answer(answer: str) -> bool:
     return (
         bool(answer.strip())
         and looks_like_project_summary(answer)
+        and not looks_like_legacy_project_summary(answer)
         and not looks_like_file_inventory(answer)
         and not looks_like_source_dump(answer)
     )

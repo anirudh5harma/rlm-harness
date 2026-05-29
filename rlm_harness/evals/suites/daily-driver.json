@@ -62,10 +62,16 @@
       },
       "output_contains": [
         "Project Summary",
-        "inventory-tool"
+        "inventory-tool",
+        "What I would do next"
       ],
       "output_not_contains": [
-        "__RLM_FINAL_ANSWER__"
+        "__RLM_FINAL_ANSWER__",
+        "Files inspected",
+        "Key config/docs",
+        "Recent commits",
+        "Notable source files",
+        "Working tree:"
       ]
     }
   ]

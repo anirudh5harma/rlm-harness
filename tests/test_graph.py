@@ -26,6 +26,11 @@ from rlm_harness.graph.nodes import (
     render_observation,
     rlm_action_context,
 )
+from rlm_harness.graph.task_policy import (
+    looks_like_legacy_project_summary,
+    looks_like_project_summary,
+    looks_like_project_summary_markup_noise,
+)
 from rlm_harness.graph.verification import VerificationGate
 from rlm_harness.memory import Memory, MemoryPagingConfig
 from rlm_harness.memory.evolution import EvolutionProposalStore
@@ -111,7 +116,12 @@ class ToolErrorThenGoodActionClient(LMClient):
                 self.assert_recent_tool_error_context(user_text)
                 content = (
                     '{"type":"python","code":"'
-                    "print('Project summary\\\\n- recovered from invalid path')"
+                    "print('Project Summary\\\\n"
+                    "This project recovered from invalid path handling.\\\\n\\\\n"
+                    "What I would do next:\\\\n"
+                    "- recovered from invalid path\\\\n\\\\n"
+                    "Verification I would run:\\\\n"
+                    "- pytest')"
                     '"}'
                 )
         elif "Decide whether the task is complete" in user_text:
@@ -207,10 +217,13 @@ class GraphTests(unittest.TestCase):
         answer = normalize_user_output(str(overview), task="summarize this project")
 
         self.assertIn("Project Summary", answer)
-        self.assertIn("Tech stack: Node.js, TypeScript, React", answer)
+        self.assertIn("It appears to use Node.js, TypeScript, React", answer)
         self.assertIn("TanStack Start", answer)
-        self.assertIn("Useful commands", answer)
-        self.assertIn("npm run dev", answer)
+        self.assertIn("What I would do next", answer)
+        self.assertIn("Verification I would run", answer)
+        self.assertIn("npm run build", answer)
+        self.assertNotIn("Files inspected", answer)
+        self.assertNotIn("Working tree:", answer)
         self.assertNotIn("{'files':", answer)
 
     def test_what_is_this_project_is_project_summary_task(self):
@@ -239,6 +252,38 @@ class GraphTests(unittest.TestCase):
                 "- pyproject.toml"
             )
         )
+
+    def test_legacy_project_summary_is_not_accepted_as_good_answer(self):
+        legacy_summary = (
+            "Project Summary\n"
+            "What it is: [![skills.sh](https://skills.sh/b/a3fckx/sansara)]"
+            "(https://skills.sh/b/a3fckx/sansara)\n"
+            "Files inspected: 300\n"
+            "Key config/docs: README.md, Cargo.toml\n"
+            "Working tree:\n"
+            "M  crates/sansara-cli/src/main.rs\n"
+            "Recent commits:\n"
+            "3236378 chore: simplify sansara routing and docs\n"
+            "Notable source files:\n"
+            "- README.md"
+        )
+
+        self.assertTrue(looks_like_legacy_project_summary(legacy_summary))
+        self.assertFalse(looks_like_project_summary(legacy_summary))
+
+    def test_markdown_scrape_noise_is_not_accepted_as_project_summary(self):
+        noisy_summary = (
+            "Project Summary\n"
+            "this project is vault-native autonomous agent OS: a **flat wiki** "
+            "Obsidian vault is the world model. It appears to use Rust.\n"
+            "What I would do next:\n"
+            "- Read the README.\n"
+            "Verification I would run:\n"
+            "- cargo test\n"
+        )
+
+        self.assertTrue(looks_like_project_summary_markup_noise(noisy_summary))
+        self.assertFalse(looks_like_project_summary(noisy_summary))
 
     def test_code_edit_task_requires_change_or_verification_evidence(self):
         self.assertTrue(is_code_editing_task("fix failing tests in mathlib.py"))
@@ -339,6 +384,7 @@ class GraphTests(unittest.TestCase):
         system_prompt = messages[0].content
         self.assertIn("project_summary()", system_prompt)
         self.assertIn("Never print raw source code", system_prompt)
+        self.assertIn("plain, friendly English", system_prompt)
 
     def test_action_prompt_routes_project_audit_to_audit_tool(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -428,9 +474,9 @@ class GraphTests(unittest.TestCase):
                 sandbox_tools.WORKSPACE = old_workspace
 
         self.assertIn("Project Gap Analysis", audit)
-        self.assertIn("Findings", audit)
+        self.assertIn("What I would fix or clarify next", audit)
         self.assertIn("Evidence:", audit)
-        self.assertIn("Recommendation:", audit)
+        self.assertIn("Next move:", audit)
 
     def test_project_summary_reflects_source_dump_as_incomplete(self):
         source_dump = "\n".join(
@@ -547,7 +593,97 @@ class GraphTests(unittest.TestCase):
 
         self.assertIn("Project Summary", answer)
         self.assertIn("personal portfolio app", answer)
+        self.assertIn("What I would do next", answer)
         self.assertNotEqual(answer, bad_answer)
+
+    def test_project_summary_fallback_replaces_legacy_metric_summary(self):
+        legacy_answer = (
+            "Project Summary\n"
+            "What it is: [![skills.sh](https://skills.sh/b/a3fckx/sansara)]"
+            "(https://skills.sh/b/a3fckx/sansara)\n"
+            "Files inspected: 300\n"
+            "Key config/docs: README.md, Cargo.toml\n"
+            "Working tree:\n"
+            "M  crates/sansara-cli/src/main.rs\n"
+            "Recent commits:\n"
+            "3236378 chore: simplify sansara routing and docs\n"
+            "Notable source files:\n"
+            "- README.md"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "README.md").write_text(
+                "# Sansara\n\n"
+                "[![skills.sh](https://skills.sh/b/a3fckx/sansara)]"
+                "(https://skills.sh/b/a3fckx/sansara)\n\n"
+                "Vault-native agent OS for coding assistants.\n",
+                encoding="utf-8",
+            )
+            (workspace / "Cargo.toml").write_text(
+                '[package]\nname = "sansara"\nversion = "0.1.0"\n',
+                encoding="utf-8",
+            )
+
+            answer = fallback_project_answer_if_needed(
+                "what is this project about and what must I do next",
+                legacy_answer,
+                workspace,
+                "done",
+            )
+
+        self.assertIn("Project Summary", answer)
+        self.assertIn("sansara is vault-native agent OS for coding assistants.", answer)
+        self.assertIn("What I would do next", answer)
+        self.assertIn("Verification I would run", answer)
+        self.assertNotIn("Files inspected", answer)
+        self.assertNotIn("Working tree:", answer)
+        self.assertNotIn("skills.sh", answer)
+
+    def test_done_replaces_legacy_project_summary_before_final_answer(self):
+        legacy_answer = (
+            "Project Summary\n"
+            "What it is: [![skills.sh](https://skills.sh/b/a3fckx/sansara)]"
+            "(https://skills.sh/b/a3fckx/sansara)\n"
+            "Files inspected: 300\n"
+            "Key config/docs: README.md, Cargo.toml\n"
+            "Working tree:\n"
+            "M  crates/sansara-cli/src/main.rs\n"
+            "Recent commits:\n"
+            "3236378 chore: simplify sansara routing and docs\n"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "README.md").write_text(
+                "# Sansara\n\nVault-native agent OS for coding assistants.\n",
+                encoding="utf-8",
+            )
+            traces = TraceStore(workspace / "traces.db")
+            run_id = traces.start_run(
+                "what is this project about and what must I do next",
+                str(workspace),
+            )
+            state = HarnessState(
+                task="what is this project about and what must I do next",
+                workspace=str(workspace),
+                thread_id=run_id,
+                run_id=run_id,
+                scratch={
+                    "last_action": render_observation(
+                        {
+                            "status": "ok",
+                            "stdout": legacy_answer,
+                            "stderr": "",
+                            "code": "print(project_summary())",
+                        }
+                    )
+                },
+            )
+
+            final_state = Nodes(LMClient(provider="stub"), traces).done(state)
+
+        self.assertIn("Project Summary", final_state.final_answer)
+        self.assertIn("What I would do next", final_state.final_answer)
+        self.assertNotIn("Files inspected", final_state.final_answer)
 
     def test_stopped_project_summary_source_dump_does_not_return_source(self):
         source_dump = "\n".join(

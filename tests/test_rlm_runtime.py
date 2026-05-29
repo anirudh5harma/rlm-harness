@@ -126,6 +126,7 @@ class RLMRuntimeTests(unittest.TestCase):
         self.assertIn("project_audit", RLM_SYSTEM_PROMPT)
         self.assertIn("Do not answer by\nprinting raw source code", RLM_SYSTEM_PROMPT)
         self.assertIn("file inventory", RLM_SYSTEM_PROMPT)
+        self.assertIn("friendly, ordinary English", RLM_SYSTEM_PROMPT)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ import sys
 import time
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TextIO
 
 from rlm_harness.config import (
     CONFIG_PATH,
@@ -86,6 +86,23 @@ INTERNAL_COMMANDS = {
 }
 ALL_COMMANDS = PUBLIC_COMMANDS | INTERNAL_COMMANDS
 DEFAULT_PROG = "harness"
+ANSI_RESET = "\033[0m"
+ANSI_CYAN = "\033[36m"
+ANSI_BLUE = "\033[34m"
+ANSI_RED = "\033[31m"
+ANSI_DIM = "\033[2m"
+
+GRAPH_NODE_MARKERS = {
+    "memory_read": ("memory", "loading relevant memory"),
+    "plan": ("plan", "building the run plan"),
+    "act": ("act", "choosing the next step"),
+    "execute_action": ("work", "using workspace tools"),
+    "verify": ("check", "running focused verification"),
+    "observe": ("read", "reviewing tool output"),
+    "reflect": ("think", "deciding whether to continue"),
+    "done": ("final", "preparing the response"),
+    "learn": ("learn", "saving useful preferences"),
+}
 
 
 def build_client(args: argparse.Namespace) -> LMClient:
@@ -135,6 +152,114 @@ def build_runtime(
     )
 
 
+def terminal_flag(value: str | None) -> Optional[bool]:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on", "always"}:
+        return True
+    if normalized in {"0", "false", "no", "off", "never", "none"}:
+        return False
+    return None
+
+
+def stream_is_tty(stream: TextIO) -> bool:
+    isatty = getattr(stream, "isatty", None)
+    return bool(isatty()) if callable(isatty) else False
+
+
+def should_emit_run_markers(args: argparse.Namespace, stream: TextIO) -> bool:
+    if (
+        getattr(args, "json_output", False)
+        or getattr(args, "quiet", False)
+        or getattr(args, "stream", False)
+    ):
+        return False
+    progress = terminal_flag(os.environ.get("HARNESS_PROGRESS"))
+    if progress is not None:
+        return progress
+    return stream_is_tty(stream)
+
+
+def should_use_color(stream: TextIO) -> bool:
+    color = terminal_flag(os.environ.get("HARNESS_COLOR"))
+    if color is not None:
+        return color
+    if os.environ.get("NO_COLOR"):
+        return False
+    if terminal_flag(os.environ.get("CLICOLOR_FORCE")) is True:
+        return True
+    if terminal_flag(os.environ.get("FORCE_COLOR")) is True:
+        return True
+    return stream_is_tty(stream) and os.environ.get("TERM") != "dumb"
+
+
+def style_text(text: str, color: str, enabled: bool) -> str:
+    return f"{color}{text}{ANSI_RESET}" if enabled else text
+
+
+def compact_marker_text(text: str, max_chars: int = 120) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= max_chars:
+        return compact
+    return f"{compact[: max_chars - 3].rstrip()}..."
+
+
+def run_command_label(task: str) -> str:
+    return f"harness run {shlex.quote(compact_marker_text(task))}"
+
+
+class RunConsole:
+    def __init__(self, args: argparse.Namespace, stream: Optional[TextIO] = None):
+        self.stream = stream or sys.stderr
+        self.enabled = should_emit_run_markers(args, self.stream)
+        self.color = should_use_color(self.stream)
+        self.memory_enabled = not getattr(args, "no_memory", False)
+
+    def start(self, args: argparse.Namespace, task: str, workspace: Path) -> None:
+        self.marker("command", run_command_label(task), important=True)
+        self.marker("workspace", str(workspace), important=True)
+        mode = [
+            f"provider={args.provider}",
+            f"model={args.model}",
+            f"sandbox={'off' if args.no_sandbox else 'on'}",
+        ]
+        self.marker("mode", ", ".join(mode), important=True)
+
+    def marker(
+        self,
+        label: str,
+        message: str,
+        *,
+        important: bool = False,
+        label_color: str = ANSI_CYAN,
+    ) -> None:
+        if not self.enabled:
+            return
+        rendered_label = style_text(f"[{label}]", label_color, self.color)
+        rendered_message = style_text(message, ANSI_BLUE, self.color) if important else message
+        print(f"{rendered_label} {rendered_message}".rstrip(), file=self.stream)
+
+    def graph_update(self, update: object) -> None:
+        for node in graph_update_nodes(update):
+            if not self.memory_enabled and node in {"memory_read", "learn"}:
+                continue
+            marker = GRAPH_NODE_MARKERS.get(node)
+            if marker is None:
+                continue
+            label, message = marker
+            self.marker(label, message)
+
+    def finish(self, status: str, run_id: str) -> None:
+        if status == "done":
+            self.marker("done", f"response ready ({run_id})", important=True)
+        else:
+            self.marker(status, f"finished with status {status} ({run_id})", important=True)
+
+    def error(self, message: str) -> None:
+        self.marker("error", message, important=True, label_color=ANSI_RED)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     return run_task(args, args.task, args.thread_id, Path(args.workspace).resolve())
 
@@ -160,8 +285,10 @@ def run_task(
     thread_id: Optional[str],
     workspace: Path,
 ) -> int:
+    console = RunConsole(args)
     traces = TraceStore(Path(args.trace_db))
     run_id = traces.start_run(task, str(workspace), thread_id=thread_id)
+    console.start(args, task, workspace)
     state = HarnessState(
         task=task,
         workspace=str(workspace),
@@ -183,6 +310,10 @@ def run_task(
 
     try:
         with ExitStack() as stack:
+            console.marker(
+                "setup",
+                "loading memory and profile" if not args.no_memory else "memory disabled",
+            )
             memory = (
                 None
                 if args.no_memory
@@ -194,6 +325,7 @@ def run_task(
                 else stack.enter_context(Memory(Path(args.profile_db)))
             )
             runtime = build_runtime(args, workspace, memory, profile_memory)
+            console.marker("graph", "preparing runtime")
             graph = build_graph(
                 Nodes(build_client(args), traces, runtime),
                 backend=args.graph_backend,
@@ -201,16 +333,21 @@ def run_task(
             )
             if args.stream:
                 final_state = run_streaming_graph(graph, state)
+            elif console.enabled and hasattr(graph, "stream"):
+                final_state = run_marked_graph(graph, state, console)
             else:
+                console.marker("agent", "working through the request")
                 final_state = graph.invoke(state)
             close_graph(graph)
         traces.finish_run(run_id, final_state.status)
     except (LMClientError, MemoryError, SandboxError) as exc:
+        console.error(str(exc))
         traces.event(run_id, "error", {"message": str(exc)}, node="cli")
         traces.finish_run(run_id, "error")
         emit_run_output(args, None, traces, run_id, error=str(exc))
         return 1
 
+    console.finish(final_state.status, run_id)
     emit_run_output(args, final_state, traces, run_id)
     return 0 if final_state.status == "done" else 1
 
@@ -272,13 +409,38 @@ def run_streaming_graph(graph, state: HarnessState) -> HarnessState:
     final_state = None
     for update in graph.stream(state):
         print(json.dumps({"graph_update": update}, default=str, sort_keys=True))
-        if isinstance(update, dict):
-            for value in update.values():
-                if isinstance(value, HarnessState):
-                    final_state = value
-                elif isinstance(value, dict):
-                    final_state = HarnessState.model_validate(value)
+        final_state = graph_state_from_update(update) or final_state
     return final_state or graph.invoke(state)
+
+
+def run_marked_graph(graph, state: HarnessState, console: RunConsole) -> HarnessState:
+    if not hasattr(graph, "stream"):
+        console.marker("agent", "working through the request")
+        return graph.invoke(state)
+    final_state = None
+    for update in graph.stream(state):
+        console.graph_update(update)
+        final_state = graph_state_from_update(update) or final_state
+    return final_state or graph.invoke(state)
+
+
+def graph_update_nodes(update: object) -> list[str]:
+    if not isinstance(update, dict):
+        return []
+    return [node for node in update if isinstance(node, str)]
+
+
+def graph_state_from_update(update: object) -> Optional[HarnessState]:
+    if isinstance(update, HarnessState):
+        return update
+    if not isinstance(update, dict):
+        return None
+    for value in update.values():
+        if isinstance(value, HarnessState):
+            return value
+        if isinstance(value, dict):
+            return HarnessState.model_validate(value)
+    return None
 
 
 def close_graph(graph) -> None:
