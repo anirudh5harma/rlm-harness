@@ -12,6 +12,9 @@ from rlm_harness.types import Msg
 class FakeResponse:
     status = 200
 
+    def __init__(self, content: str = "hello"):
+        self.content = content
+
     def __enter__(self):
         return self
 
@@ -20,12 +23,12 @@ class FakeResponse:
 
     def read(self):
         return json.dumps(
-            {
-                "model": "test-model",
-                "choices": [{"message": {"content": "hello"}}],
-                "usage": {"prompt_tokens": 3, "completion_tokens": 1},
-            }
-        ).encode("utf-8")
+                    {
+                        "model": "test-model",
+                        "choices": [{"message": {"content": self.content}}],
+                        "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+                    }
+                ).encode("utf-8")
 
 
 class LMClientTests(unittest.TestCase):
@@ -58,9 +61,86 @@ class LMClientTests(unittest.TestCase):
         self.assertEqual(timeout, 120)
         self.assertEqual(request.full_url, "http://127.0.0.1:8080/v1/chat/completions")
         self.assertEqual(payload["max_tokens"], 12)
+        self.assertNotIn("response_format", payload)
         self.assertEqual(payload["messages"][0]["content"], "Reply with exactly: hello")
         self.assertEqual(request.headers["Authorization"], "Bearer token")
         self.assertIn("rlm-harness/0.1", request.headers["User-agent"])
+
+    def test_openai_compatible_requests_json_mode_for_action_prompts(self):
+        seen_payloads = []
+
+        def fake_urlopen(request, timeout):
+            seen_payloads.append(json.loads(request.data.decode("utf-8")))
+            return FakeResponse('{"kind":"project_summary"}')
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            client = LMClient(
+                provider="openai-compatible",
+                model="test-model",
+                base_url="http://127.0.0.1:8080/v1",
+                api_key="token",
+            )
+            completion = client.complete(
+                [
+                    Msg(
+                        role="user",
+                        content=(
+                            "Return one typed action JSON object.\n"
+                            "Task: what is this project?"
+                        ),
+                    )
+                ],
+                max_tokens=12,
+                temperature=0,
+            )
+
+        self.assertEqual(completion.content, '{"kind":"project_summary"}')
+        self.assertEqual(
+            seen_payloads[0]["response_format"],
+            {"type": "json_object"},
+        )
+
+    def test_openai_compatible_retries_without_json_mode_when_unsupported(self):
+        seen_payloads = []
+
+        def fake_urlopen(request, timeout):
+            payload = json.loads(request.data.decode("utf-8"))
+            seen_payloads.append(payload)
+            if "response_format" in payload:
+                raise urllib.error.HTTPError(
+                    request.full_url,
+                    400,
+                    "Bad Request",
+                    hdrs={},
+                    fp=BytesIO(b'{"error":{"message":"unsupported parameter: response_format"}}'),
+                )
+            return FakeResponse('{"kind":"project_summary"}')
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            client = LMClient(
+                provider="openai-compatible",
+                model="test-model",
+                base_url="http://127.0.0.1:8080/v1",
+                api_key="token",
+            )
+            completion = client.complete(
+                [
+                    Msg(
+                        role="user",
+                        content=(
+                            "Return only valid JSON for this action.\n"
+                            "Task: what is this project?"
+                        ),
+                    )
+                ],
+                max_tokens=12,
+                temperature=0,
+            )
+
+        self.assertEqual(completion.content, '{"kind":"project_summary"}')
+        self.assertEqual(len(seen_payloads), 2)
+        self.assertIn("response_format", seen_payloads[0])
+        self.assertNotIn("response_format", seen_payloads[1])
 
     def test_http_error_includes_provider_detail(self):
         def fake_urlopen(request, timeout):

@@ -1,5 +1,6 @@
 import contextlib
 import json
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -208,6 +209,29 @@ class ToolExecutorTests(unittest.TestCase):
         self.assertEqual(observation.kind, "patch")
         self.assertEqual(observation.changed_files, ["app.py"])
         self.assertEqual(observation.diff_summary, "patch applied")
+
+    def test_apply_patch_targets_nested_workspace_inside_parent_git_repo(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            workspace = repo / "eval-work" / "case"
+            workspace.mkdir(parents=True)
+            target = workspace / "app.py"
+            target.write_text("print('old')\n", encoding="utf-8")
+            patch = (
+                "diff --git a/app.py b/app.py\n"
+                "--- a/app.py\n"
+                "+++ b/app.py\n"
+                "@@ -1 +1 @@\n"
+                "-print('old')\n"
+                "+print('new')\n"
+            )
+
+            observation = ToolExecutor(workspace).execute(ApplyPatchAction(diff=patch))
+            content = target.read_text(encoding="utf-8")
+
+        self.assertEqual(observation.kind, "patch")
+        self.assertEqual(content, "print('new')\n")
 
     def test_destructive_shell_command_returns_error_observation(self):
         with tempfile.TemporaryDirectory() as temp_dir:

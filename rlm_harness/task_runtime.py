@@ -7,13 +7,11 @@ import shlex
 import sys
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Optional, TextIO
+from typing import Any, Optional, TextIO
 
 from rlm_harness.actions import CompleteTaskAction, CompletionStatus
 from rlm_harness.cli_catalog import (
-    ANSI_BLUE,
     ANSI_CYAN,
-    ANSI_RED,
     should_use_color,
     stream_is_tty,
     style_text,
@@ -31,6 +29,13 @@ from rlm_harness.runtime_cli import build_client
 from rlm_harness.sandbox import RLMSubcallConfig, SandboxConfig, SandboxError
 from rlm_harness.tracing import TraceStore
 from rlm_harness.types import HarnessState, TaskPlan
+
+try:
+    from rich.console import Console as RichConsole
+    from rich.status import Status as RichStatus
+except ImportError:  # pragma: no cover - exercised only in minimal installs.
+    RichConsole = None
+    RichStatus = None
 
 PERMISSION_MODE_ALIASES = {
     AutonomyMode.ASK.value: AutonomyMode.ASK.value,
@@ -134,17 +139,23 @@ class RunConsole:
         self.enabled = should_emit_run_markers(args, self.stream)
         self.color = should_use_color(self.stream)
         self.memory_enabled = not getattr(args, "no_memory", False)
+        self._rich_status: Any = None
+        self._line_active = False
+        self._use_rich = (
+            self.enabled
+            and stream_is_tty(self.stream)
+            and RichConsole is not None
+            and RichStatus is not None
+        )
 
     def start(self, args: argparse.Namespace, task: str, workspace: Path) -> None:
-        self.marker("command", run_command_label(task), important=True)
-        self.marker("workspace", str(workspace), important=True)
         mode = [
             f"provider={args.provider}",
             f"model={args.model}",
             f"sandbox={'off' if args.no_sandbox else 'on'}",
             f"mode={args.autonomy}",
         ]
-        self.marker("mode", ", ".join(mode), important=True)
+        self.update(f"{run_command_label(task)} • {workspace.name} • {', '.join(mode)}")
 
     def marker(
         self,
@@ -154,11 +165,35 @@ class RunConsole:
         important: bool = False,
         label_color: str = ANSI_CYAN,
     ) -> None:
+        self.update(f"{label}: {message}", important=important, label_color=label_color)
+
+    def update(
+        self,
+        message: str,
+        *,
+        important: bool = False,
+        label_color: str = ANSI_CYAN,
+    ) -> None:
         if not self.enabled:
             return
-        rendered_label = style_text(f"[{label}]", label_color, self.color)
-        rendered_message = style_text(message, ANSI_BLUE, self.color) if important else message
-        print(f"{rendered_label} {rendered_message}".rstrip(), file=self.stream)
+        rendered = style_text(message, label_color if important else ANSI_CYAN, self.color)
+        if self._use_rich:
+            if self._rich_status is None:
+                console = RichConsole(file=self.stream, force_terminal=self.color)
+                self._rich_status = RichStatus(
+                    rendered,
+                    console=console,
+                    spinner="dots",
+                    spinner_style="cyan",
+                )
+                self._rich_status.start()
+                return
+            self._rich_status.update(rendered)
+            return
+
+        self.stream.write("\r\033[K" + rendered)
+        self.stream.flush()
+        self._line_active = True
 
     def graph_update(self, update: object) -> None:
         for node in graph_update_nodes(update):
@@ -171,13 +206,22 @@ class RunConsole:
             self.marker(label, message)
 
     def finish(self, status: str, run_id: str) -> None:
-        if status == "done":
-            self.marker("done", f"response ready ({run_id})", important=True)
-        else:
-            self.marker(status, f"finished with status {status} ({run_id})", important=True)
+        self.clear()
 
     def error(self, message: str) -> None:
-        self.marker("error", message, important=True, label_color=ANSI_RED)
+        self.clear()
+
+    def clear(self) -> None:
+        if not self.enabled:
+            return
+        if self._rich_status is not None:
+            self._rich_status.stop()
+            self._rich_status = None
+            return
+        if self._line_active:
+            self.stream.write("\r\033[K")
+            self.stream.flush()
+            self._line_active = False
 
 
 def apply_permission_aliases(args: argparse.Namespace) -> argparse.Namespace:

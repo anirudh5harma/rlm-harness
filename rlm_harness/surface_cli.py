@@ -23,13 +23,9 @@ def cmd_commands(args: argparse.Namespace) -> int:
 
 
 def cmd_palette(args: argparse.Namespace) -> int:
-    registry = default_tool_registry()
     include_internal = not args.public_only
     if args.json_output:
-        payload = {
-            "commands": command_catalog(include_internal=include_internal),
-            "tools": registry.payload(include_internal=include_internal),
-        }
+        payload = {"commands": command_catalog(include_internal=include_internal)}
         print(json.dumps(payload, sort_keys=True))
     else:
         print(
@@ -65,7 +61,7 @@ def add_surface_commands(subparsers) -> None:
     )
     tools.set_defaults(func=cmd_tools)
 
-    palette = subparsers.add_parser("palette", help="Show slash commands and tools.")
+    palette = subparsers.add_parser("palette", help="Show slash commands.")
     palette.add_argument("--json", dest="json_output", action="store_true")
     palette.add_argument(
         "--public-only",

@@ -56,12 +56,13 @@ If readiness shows Docker warnings, you can still try a non-sandboxed run with
 
 ## Run experience
 
-Interactive runs show a compact progress rail on stderr while the final answer
-stays on stdout for piping and scripts. The rail uses simple markers such as
-`[command]`, `[setup]`, `[plan]`, `[work]`, `[check]`, and `[done]`; commands and
-important values are highlighted in cyan/blue when the terminal supports color.
+Interactive runs show a single updating status line on stderr while the final
+answer stays on stdout for piping and scripts. In a real terminal Harness uses a
+spinner-style status line; in plain streams it falls back to carriage-return
+updates instead of printing a new line for every graph step. Visible accents use
+light cyan when the terminal supports color.
 
-`--json`, `--stream`, and `--quiet` suppress the progress rail. Set
+`--json`, `--stream`, and `--quiet` suppress the status line. Set
 `HARNESS_PROGRESS=on` or `HARNESS_PROGRESS=off` to override auto-detection, and
 `HARNESS_COLOR=on` or `HARNESS_COLOR=off` to override color.
 
@@ -69,7 +70,7 @@ important values are highlighted in cyan/blue when the terminal supports color.
 
 ```bash
 harness                              # interactive mode
-harness /                            # show slash commands and action tools
+harness /                            # show slash commands
 harness ask "what is this project?"   # read-only workspace answer
 harness plan "how should we fix it?"  # read-only implementation plan
 harness "fix the failing tests"       # run one task with sandboxed typed tools
@@ -109,12 +110,13 @@ harness feedback add "Liked the concise summary." --rating good
 harness doctor
 ```
 
-Inside interactive mode, type `/` to show the full slash palette: public commands,
-runtime commands, and action tools grouped by scope. Harness keeps compatibility
-aliases where they are useful (`-p`, `--plan`, `--permission-mode`,
-`--auto-accept`), but the primary shape is Harness-native: `ask` for read-only
-answers, `plan` for read-only implementation plans, `work` for edits, `continue`
-for thread flow, and `taste` for learning your preferences over time.
+Inside interactive mode, type `/` to show the slash palette: public commands and
+runtime commands only. Use `harness tools` when you want the lower-level action
+tool catalog. Harness keeps compatibility aliases where they are useful (`-p`,
+`--plan`, `--permission-mode`, `--auto-accept`), but the primary shape is
+Harness-native: `ask` for read-only answers, `plan` for read-only implementation
+plans, `work` for edits, `continue` for thread flow, and `taste` for learning
+your preferences over time.
 Use `harness status` as the daily-driver handoff: it summarizes provider/API key
 state, latest thread, taste, evolution, MCP configuration, storage paths, and a
 short `next` list.

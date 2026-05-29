@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 
 from rlm_harness.actions import (
@@ -36,6 +37,9 @@ def parse_typed_tool_action(text: str) -> AnyAction:
         payload = {**payload, "kind": payload["name"]}
         payload.pop("type", None)
         payload.pop("name", None)
+    elif "action_kind" in payload and "kind" not in payload:
+        payload = {**payload, "kind": payload["action_kind"]}
+        payload.pop("action_kind", None)
     elif "name" in payload and "kind" not in payload:
         payload = {**payload, "kind": payload["name"]}
         payload.pop("name", None)
@@ -68,19 +72,28 @@ def parse_embedded_json_object(text: str, original: json.JSONDecodeError) -> dic
         lines = stripped.splitlines()
         if len(lines) >= 3 and lines[-1].strip() == "```":
             inner = "\n".join(lines[1:-1]).strip()
-            try:
-                return json.loads(inner)
-            except json.JSONDecodeError:
-                pass
+            payload = parse_jsonish_mapping(inner)
+            if payload is not None:
+                return payload
 
     start = stripped.find("{")
     end = stripped.rfind("}")
     if start >= 0 and end > start:
-        try:
-            return json.loads(stripped[start : end + 1])
-        except json.JSONDecodeError:
-            pass
+        payload = parse_jsonish_mapping(stripped[start : end + 1])
+        if payload is not None:
+            return payload
     raise ActionParseError("action was not valid JSON") from original
+
+
+def parse_jsonish_mapping(text: str) -> dict | None:
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            payload = ast.literal_eval(text)
+        except (SyntaxError, ValueError):
+            return None
+    return payload if isinstance(payload, dict) else None
 
 
 def render_typed_observation(observation: AnyObservation) -> str:

@@ -293,7 +293,7 @@ class TraceStoreTests(unittest.TestCase):
         self.assertNotIn("Trace report", output)
         self.assertNotIn("run_started", output)
 
-    def test_cli_run_progress_markers_go_to_stderr(self):
+    def test_cli_run_progress_uses_single_updating_status_line(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             trace_db = str(Path(temp_dir) / "traces.db")
             stdout = io.StringIO()
@@ -322,14 +322,16 @@ class TraceStoreTests(unittest.TestCase):
                     ]
                 )
 
-        markers = stderr.getvalue()
+        progress = stderr.getvalue()
         self.assertEqual(exit_code, 0)
         self.assertIn("Stub response", stdout.getvalue())
-        self.assertIn("[command] harness run", markers)
-        self.assertIn("[workspace]", markers)
-        self.assertIn("[setup] memory disabled", markers)
-        self.assertIn("[done]", markers)
-        self.assertNotIn("Stub response", markers)
+        self.assertIn("\r", progress)
+        self.assertEqual(progress.count("\n"), 0)
+        self.assertIn("harness run", progress)
+        self.assertIn("setup: memory disabled", progress)
+        self.assertNotIn("[command]", progress)
+        self.assertNotIn("[setup]", progress)
+        self.assertNotIn("Stub response", progress)
 
     def test_cli_run_json_suppresses_progress_markers(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -400,7 +402,7 @@ class TraceStoreTests(unittest.TestCase):
         self.assertIn("Stub response", stdout.getvalue())
         self.assertEqual(stderr.getvalue(), "")
 
-    def test_run_console_colors_command_and_important_values(self):
+    def test_run_console_uses_light_cyan_for_status(self):
         stderr = io.StringIO()
         args = Namespace(json_output=False, quiet=False, stream=False)
         with patch.dict(
@@ -412,8 +414,8 @@ class TraceStoreTests(unittest.TestCase):
             console.marker("command", "harness run task", important=True)
 
         marker = stderr.getvalue()
-        self.assertIn("\033[96m[command]\033[0m", marker)
-        self.assertIn("\033[94mharness run task\033[0m", marker)
+        self.assertIn("\033[96mcommand: harness run task\033[0m", marker)
+        self.assertNotIn("\033[94m", marker)
 
     def test_json_payload_uses_final_state_answer_for_error_runs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
