@@ -6,7 +6,7 @@ from typing import Literal, Optional
 
 from rlm_harness.graph.nodes import Nodes
 from rlm_harness.graph.task_policy import is_code_editing_task
-from rlm_harness.types import HarnessState
+from rlm_harness.types import ExecutionBudget, HarnessState, PlanStep, PlanStepStatus, TaskPlan
 
 
 class HarnessGraph:
@@ -76,6 +76,7 @@ def _build_langgraph(nodes: Nodes, checkpoint_path: Optional[Path] = None):
     connection = None
     if checkpoint_path is not None:
         try:
+            from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
             from langgraph.checkpoint.sqlite import SqliteSaver
         except ImportError as exc:
             raise RuntimeError(
@@ -84,7 +85,16 @@ def _build_langgraph(nodes: Nodes, checkpoint_path: Optional[Path] = None):
             ) from exc
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(str(checkpoint_path), check_same_thread=False)
-        checkpointer = SqliteSaver(connection)
+        serde = JsonPlusSerializer(
+            allowed_msgpack_modules=(
+                ExecutionBudget,
+                HarnessState,
+                PlanStep,
+                PlanStepStatus,
+                TaskPlan,
+            )
+        )
+        checkpointer = SqliteSaver(connection, serde=serde)
 
     graph = StateGraph(HarnessState)
     graph.add_node("memory_read", nodes.memory_read)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import subprocess
 import unittest
@@ -12,6 +13,8 @@ from unittest.mock import patch
 import tomllib
 
 from rlm_harness import cli, config
+from rlm_harness.kernel import AutonomyMode
+from rlm_harness.tracing import TraceStore
 
 
 class CLIConfigTests(unittest.TestCase):
@@ -29,10 +32,193 @@ class CLIConfigTests(unittest.TestCase):
     def test_default_task_alias_still_normalizes_to_run(self):
         self.assertEqual(cli.normalize_argv(["fix tests"]), ["run", "fix tests"])
         self.assertEqual(cli.normalize_argv(["run", "fix tests"]), ["run", "fix tests"])
+        self.assertEqual(cli.normalize_argv(["ask", "what is this"]), ["ask", "what is this"])
+        self.assertEqual(cli.normalize_argv(["plan", "fix this"]), ["plan", "fix this"])
+        self.assertEqual(cli.normalize_argv(["work", "fix tests"]), ["work", "fix tests"])
+        self.assertEqual(cli.normalize_argv(["commands"]), ["commands"])
+        self.assertEqual(cli.normalize_argv(["continue"]), ["continue"])
+        self.assertEqual(cli.normalize_argv(["/continue"]), ["continue"])
+        self.assertEqual(cli.normalize_argv(["--continue", "next"]), ["continue", "next"])
+        self.assertEqual(cli.normalize_argv(["-c", "next"]), ["continue", "next"])
+        self.assertEqual(cli.normalize_argv(["tools"]), ["tools"])
+        self.assertEqual(cli.normalize_argv(["status"]), ["status"])
+        self.assertEqual(cli.normalize_argv(["/status"]), ["status"])
+        self.assertEqual(cli.normalize_argv(["taste"]), ["taste"])
+        self.assertEqual(cli.normalize_argv(["/taste", "list"]), ["taste", "list"])
         self.assertEqual(cli.normalize_argv(["update"]), ["update"])
         self.assertEqual(cli.normalize_argv(["/update"]), ["update"])
         self.assertEqual(cli.normalize_argv(["--help"]), ["--help"])
         self.assertEqual(cli.normalize_argv(["/model", "custom/coder"]), ["model", "custom/coder"])
+
+    def test_commands_lists_clean_public_surface(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(cli.main(["commands"]), 0)
+
+        text = stdout.getvalue()
+        self.assertIn("Harness commands", text)
+        self.assertIn('harness ask "what is this project?"', text)
+        self.assertIn('harness plan "how should we fix this?"', text)
+        self.assertIn('harness "fix tests"', text)
+        self.assertIn('harness work "fix tests"', text)
+        self.assertIn("harness continue [task]", text)
+        self.assertIn("harness trace list|report|events", text)
+        self.assertIn("harness status", text)
+        self.assertIn("harness tools", text)
+        self.assertIn("harness profile list|learn|approve|reject", text)
+        self.assertIn("harness taste list|learn|approve|reject", text)
+        self.assertIn("Tip:", text)
+
+    def test_commands_json_is_agent_readable(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(cli.main(["commands", "--json"]), 0)
+
+        commands = json.loads(stdout.getvalue())
+        names = {command["name"] for command in commands}
+
+        self.assertIn("ask", names)
+        self.assertIn("plan", names)
+        self.assertIn("run", names)
+        self.assertIn("work", names)
+        self.assertIn("continue", names)
+        self.assertIn("trace", names)
+        self.assertIn("status", names)
+        self.assertIn("profile", names)
+        self.assertIn("taste", names)
+        self.assertNotIn("sandbox", names)
+
+    def test_tools_lists_capability_catalog(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(cli.main(["tools"]), 0)
+
+        text = stdout.getvalue()
+        self.assertIn("Harness tools", text)
+        self.assertIn("project_summary [read]", text)
+        self.assertIn("write_file [high] (confirmation)", text)
+        self.assertNotIn("python_repl", text)
+
+    def test_tools_json_is_agent_readable(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(cli.main(["tools", "--json"]), 0)
+
+        tools = json.loads(stdout.getvalue())
+        by_name = {tool["name"]: tool for tool in tools}
+
+        self.assertEqual(by_name["read_file"]["risk"], "read")
+        self.assertTrue(by_name["write_file"]["requires_confirmation"])
+        self.assertEqual(by_name["complete_task"]["side_effect"], "completion")
+        self.assertNotIn("python_repl", by_name)
+
+    def test_taste_command_learns_and_lists_records(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_db = Path(tmpdir) / "profile.db"
+            learn_stdout = io.StringIO()
+            with contextlib.redirect_stdout(learn_stdout):
+                learn_exit = cli.main(
+                    [
+                        "taste",
+                        "--profile-db",
+                        str(profile_db),
+                        "learn",
+                        "Prefer small reviewable diffs.",
+                        "--active",
+                    ]
+                )
+
+            list_stdout = io.StringIO()
+            with contextlib.redirect_stdout(list_stdout):
+                list_exit = cli.main(
+                    [
+                        "/taste",
+                        "--profile-db",
+                        str(profile_db),
+                        "list",
+                        "--json",
+                    ]
+                )
+            records = json.loads(list_stdout.getvalue())
+
+        self.assertEqual(learn_exit, 0)
+        self.assertEqual(list_exit, 0)
+        self.assertIn("active", learn_stdout.getvalue())
+        self.assertEqual(records[0]["text"], "Prefer small reviewable diffs.")
+        self.assertEqual(records[0]["status"], "active")
+
+    def test_status_command_reports_latest_run_taste_and_evolution(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            trace_db = root / "traces.db"
+            profile_db = root / "profile.db"
+            memory_db = root / "memory.db"
+            traces = TraceStore(trace_db)
+            run_id = traces.start_run(
+                "latest task",
+                str(root),
+                thread_id="thread-status",
+            )
+            traces.finish_run(run_id, "done")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    cli.main(
+                        [
+                            "taste",
+                            "--profile-db",
+                            str(profile_db),
+                            "learn",
+                            "Prefer direct answers.",
+                            "--active",
+                        ]
+                    ),
+                    0,
+                )
+                self.assertEqual(
+                    cli.main(
+                        [
+                            "evolve",
+                            "--profile-db",
+                            str(profile_db),
+                            "--memory-db",
+                            str(memory_db),
+                            "propose",
+                            "--title",
+                            "Direct answers",
+                            "--body",
+                            "Prefer direct answers.",
+                            "--rationale",
+                            "status test",
+                        ]
+                    ),
+                    0,
+                )
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = cli.main(
+                    [
+                        "status",
+                        "--trace-db",
+                        str(trace_db),
+                        "--profile-db",
+                        str(profile_db),
+                        "--memory-db",
+                        str(memory_db),
+                        "--json",
+                    ]
+                )
+            payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["latest_run"]["thread_id"], "thread-status")
+        self.assertEqual(payload["latest_run"]["task"], "latest task")
+        self.assertEqual(payload["taste"]["active"], 1)
+        self.assertEqual(payload["evolution"]["pending"], 1)
 
     def test_harness_env_vars_drive_provider_defaults(self):
         with patch.dict(
@@ -53,10 +239,146 @@ class CLIConfigTests(unittest.TestCase):
         self.assertEqual(parsed.base_url, "https://example.test/v1")
         self.assertEqual(client.api_key, "secret-key")
 
-    def test_run_defaults_to_rlm_action_engine(self):
+    def test_run_defaults_to_tool_action_engine(self):
         parsed = cli.parser().parse_args(["run", "what is this project"])
 
+        self.assertEqual(parsed.act_engine, "tool")
+
+    def test_run_accepts_rlm_compatibility_engine(self):
+        parsed = cli.parser().parse_args(["run", "what is this project", "--act-engine", "rlm"])
+
         self.assertEqual(parsed.act_engine, "rlm")
+
+    def test_run_accepts_autonomy_mode(self):
+        parsed = cli.parser().parse_args(["run", "what is this project", "--mode", "ask"])
+        runtime = cli.build_runtime(parsed, Path(".").resolve(), None, None)
+
+        self.assertEqual(parsed.autonomy, "ask")
+        self.assertEqual(runtime.autonomy, AutonomyMode.ASK)
+
+    def test_default_run_uses_typed_tools_for_coding_task(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            (workspace / "mathlib.py").write_text(
+                "def add(a, b):\n    return a - b\n",
+                encoding="utf-8",
+            )
+            (workspace / "test_mathlib.py").write_text(
+                "import unittest\n"
+                "from mathlib import add\n\n"
+                "class MathTests(unittest.TestCase):\n"
+                "    def test_add(self):\n"
+                "        self.assertEqual(add(2, 3), 5)\n\n"
+                "if __name__ == '__main__':\n"
+                "    unittest.main()\n",
+                encoding="utf-8",
+            )
+            trace_db = workspace / "traces.db"
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = cli.main(
+                    [
+                        "Fix the failing test in mathlib.py and report what changed.",
+                        "--workspace",
+                        tmpdir,
+                        "--trace-db",
+                        str(trace_db),
+                        "--provider",
+                        "stub",
+                        "--model",
+                        "stub",
+                        "--no-memory",
+                        "--graph-backend",
+                        "simple",
+                        "--json",
+                    ]
+                )
+
+            payload = json.loads(stdout.getvalue())
+            mathlib_content = (workspace / "mathlib.py").read_text(encoding="utf-8")
+            events = TraceStore(trace_db).events(payload["run_id"])
+            action_kinds = [
+                event["payload"].get("action", {}).get("kind")
+                for event in events
+                if event["kind"] == "action_selected"
+            ]
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("return a + b", mathlib_content)
+        self.assertIn("Changed files", payload["final_answer"])
+        self.assertIn("mathlib.py", payload["final_answer"])
+        self.assertIn("OK", payload["final_answer"])
+        self.assertIn("apply_patch", action_kinds)
+
+    def test_ask_command_forces_tool_engine_and_read_only_mode(self):
+        with patch.object(cli, "run_task", return_value=0) as run_task:
+            exit_code = cli.main(["ask", "what is this project", "--provider", "stub"])
+
+        args = run_task.call_args.args[0]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(args.act_engine, "tool")
+        self.assertEqual(args.autonomy, "ask")
+
+    def test_plan_command_forces_tool_engine_and_plan_only_mode(self):
+        with patch.object(cli, "run_plan_task", return_value=0) as run_plan_task, patch.object(
+            cli,
+            "run_task",
+        ) as run_task:
+            exit_code = cli.main(["plan", "fix this", "--provider", "stub"])
+
+        args = run_plan_task.call_args.args[0]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(args.act_engine, "tool")
+        self.assertEqual(args.autonomy, "plan")
+        run_task.assert_not_called()
+
+    def test_plan_command_stops_after_planning(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace_db = Path(tmpdir) / "traces.db"
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = cli.main(
+                    [
+                        "plan",
+                        "fix this",
+                        "--provider",
+                        "stub",
+                        "--model",
+                        "stub",
+                        "--workspace",
+                        tmpdir,
+                        "--trace-db",
+                        str(trace_db),
+                        "--no-memory",
+                        "--json",
+                    ]
+                )
+
+            payload = json.loads(stdout.getvalue())
+            events = TraceStore(trace_db).events(payload["run_id"])
+            event_kinds = {event["kind"] for event in events}
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "done")
+        self.assertIn("Implementation Plan", payload["final_answer"])
+        self.assertIn("Inspect the task.", payload["final_answer"])
+        self.assertIn("plan_created", event_kinds)
+        self.assertIn("completion", event_kinds)
+        self.assertNotIn("action_selected", event_kinds)
+        self.assertNotIn("observation_recorded", event_kinds)
+
+    def test_work_command_forces_tool_engine_and_sandbox_mode(self):
+        with patch.object(cli, "run_task", return_value=0) as run_task:
+            exit_code = cli.main(["work", "fix tests", "--provider", "stub"])
+
+        args = run_task.call_args.args[0]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(args.act_engine, "tool")
+        self.assertEqual(args.autonomy, "sandbox")
 
     def test_config_accepts_common_api_key_fallbacks(self):
         with patch.dict(

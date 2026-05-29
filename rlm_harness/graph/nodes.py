@@ -6,6 +6,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from rlm_harness.actions import (
+    CommandObservation,
+    CompleteTaskAction,
+    CompletionStatus,
+    ObservationStatus,
+    PythonReplAction,
+    RLMTaskAction,
+    VerificationStatus,
+    parse_action,
+)
+from rlm_harness.agents import (
+    ActionParseError,
+    executable_tool_payload,
+    parse_action_payload,
+    parse_typed_tool_action,
+    render_typed_observation,
+)
 from rlm_harness.graph.planning import (
     advance_to_next_step,
     format_plan_context,
@@ -32,6 +49,14 @@ from rlm_harness.graph.task_policy import (
     looks_like_source_dump,
 )
 from rlm_harness.graph.verification import VerificationGate, VerificationResult
+from rlm_harness.kernel import (
+    ActionSelectedEvent,
+    AutonomyMode,
+    CompletionEvent,
+    ObservationRecordedEvent,
+    PlanCreatedEvent,
+    VerificationEvent,
+)
 from rlm_harness.memory import Memory
 from rlm_harness.memory.evolution import EvolutionProposalManager
 from rlm_harness.memory.paging import MemoryPager, MemoryPagingConfig
@@ -42,16 +67,13 @@ from rlm_harness.rlm import RLMRuntime
 from rlm_harness.sandbox import DockerREPL, RLMSubcallConfig, SandboxConfig, SandboxError
 from rlm_harness.sandbox import tools as sandbox_tools
 from rlm_harness.sandbox.tools import (
-    TOOL_SCHEMAS,
     is_project_overview_payload,
     render_project_overview_summary,
 )
+from rlm_harness.tools import default_tool_registry
+from rlm_harness.tools.executor import ToolExecutor
 from rlm_harness.tracing import TraceStore
 from rlm_harness.types import HarnessState, Msg, PlanStep, PlanStepStatus, TaskPlan
-
-
-class ActionParseError(ValueError):
-    pass
 
 
 @dataclass(frozen=True)
@@ -62,6 +84,7 @@ class GraphRuntimeConfig:
     max_action_retries: int = 1
     max_iterations: int = 6
     act_engine: str = "rlm"
+    autonomy: AutonomyMode = AutonomyMode.SANDBOX
     memory: Optional[Memory] = None
     profile_memory: Optional[Memory] = None
     memory_paging: MemoryPagingConfig = MemoryPagingConfig()
@@ -80,38 +103,6 @@ def parse_python_action(text: str) -> str:
     if not isinstance(code, str) or not code.strip():
         raise ActionParseError("action code must be a non-empty string")
     return code
-
-
-def parse_action_payload(text: str) -> dict:
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        payload = parse_embedded_json_object(text, exc)
-
-    if not isinstance(payload, dict):
-        raise ActionParseError("action must be a JSON object")
-    return payload
-
-
-def parse_embedded_json_object(text: str, original: json.JSONDecodeError) -> dict:
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        lines = stripped.splitlines()
-        if len(lines) >= 3 and lines[-1].strip() == "```":
-            inner = "\n".join(lines[1:-1]).strip()
-            try:
-                return json.loads(inner)
-            except json.JSONDecodeError:
-                pass
-
-    start = stripped.find("{")
-    end = stripped.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(stripped[start : end + 1])
-        except json.JSONDecodeError:
-            pass
-    raise ActionParseError("action was not valid JSON") from original
 
 
 def render_observation(payload: dict) -> str:
@@ -270,6 +261,15 @@ class Nodes:
             },
             node="plan",
         )
+        self.traces.record_typed_event(
+            PlanCreatedEvent(
+                run_id=state.run_id,
+                sequence=self.traces.next_sequence(state.run_id),
+                node="plan",
+                strategy=state.plan.strategy,
+                steps=[step.model_dump(mode="json") for step in state.plan.steps],
+            )
+        )
         return state
 
     @maybe_traceable("Harness.act", run_type="chain")
@@ -277,6 +277,8 @@ class Nodes:
         if self.runtime.sandbox_enabled:
             if self.runtime.act_engine == "rlm":
                 return self._run_rlm_action(state)
+            if self.runtime.act_engine == "tool":
+                return self._select_tool_action(state)
             return self._select_sandbox_action(state)
 
         plan_text = format_plan_context(state.plan)
@@ -331,6 +333,18 @@ class Nodes:
     def _run_rlm_action(self, state: HarnessState) -> HarnessState:
         sandbox_config = self.runtime.sandbox_config or SandboxConfig(
             workspace=Path(state.workspace)
+        )
+        action = RLMTaskAction(
+            task=state.task,
+            reason="Run the recursive coding runtime inside the sandbox.",
+        )
+        self.traces.record_typed_event(
+            ActionSelectedEvent(
+                run_id=state.run_id,
+                sequence=self.traces.next_sequence(state.run_id),
+                node="act",
+                action=action,
+            )
         )
         try:
             runtime = RLMRuntime(
@@ -414,6 +428,90 @@ class Nodes:
         rendered = render_observation(observation)
         state.scratch["last_action"] = rendered
         state.history.append({"node": "act", "content": rendered})
+        self.traces.record_typed_event(
+            ObservationRecordedEvent(
+                run_id=state.run_id,
+                sequence=self.traces.next_sequence(state.run_id),
+                node="act",
+                observation=command_observation_from_payload(
+                    action.action_id,
+                    "rlm_runtime",
+                    observation,
+                ),
+            )
+        )
+        return state
+
+    def _select_tool_action(self, state: HarnessState) -> HarnessState:
+        action_content = ""
+        parse_error = ""
+
+        for attempt in range(self.runtime.max_action_retries + 1):
+            messages = self._tool_action_messages(state, parse_error=parse_error)
+            try:
+                completion = self.client.complete(messages, max_tokens=900, temperature=0.1)
+            except Exception as exc:
+                observation = {
+                    "status": "error",
+                    "stdout": "",
+                    "stderr": f"LLM call failed: {type(exc).__name__}: {exc}",
+                    "action": "",
+                }
+                rendered = render_observation(observation)
+                state.scratch["last_action"] = rendered
+                state.history.append({"node": "act", "content": rendered})
+                self.traces.event(
+                    state.run_id,
+                    "model_error",
+                    {"error": str(exc), "type": type(exc).__name__},
+                    node="act",
+                )
+                return state
+            action_content = completion.content
+            self.traces.event(
+                state.run_id,
+                "model_completion",
+                {
+                    "model": completion.model,
+                    "provider": completion.provider,
+                    "latency_ms": completion.latency_ms,
+                    "content": completion.content,
+                    "attempt": attempt,
+                    "act_engine": "tool",
+                },
+                node="act",
+            )
+            try:
+                action = parse_typed_tool_action(completion.content)
+                state.scratch["pending_tool_action"] = action.model_dump(mode="json")
+                state.history.append({"node": "act", "content": completion.content})
+                self.traces.record_typed_event(
+                    ActionSelectedEvent(
+                        run_id=state.run_id,
+                        sequence=self.traces.next_sequence(state.run_id),
+                        node="act",
+                        action=action,
+                    )
+                )
+                break
+            except ActionParseError as exc:
+                parse_error = str(exc)
+                self.traces.event(
+                    state.run_id,
+                    "action_parse_error",
+                    {"message": parse_error, "content": completion.content, "attempt": attempt},
+                    node="act",
+                )
+        else:
+            observation = {
+                "status": "action_parse_error",
+                "stdout": "",
+                "stderr": parse_error,
+                "action": action_content,
+            }
+            rendered = render_observation(observation)
+            state.scratch["last_action"] = rendered
+            state.history.append({"node": "act", "content": rendered})
         return state
 
     def _select_sandbox_action(self, state: HarnessState) -> HarnessState:
@@ -456,9 +554,22 @@ class Nodes:
             )
             try:
                 code = parse_python_action(completion.content)
+                action = PythonReplAction(
+                    code=code,
+                    reason="Run the model-selected Python workspace action.",
+                )
                 state.scratch["pending_action_code"] = code
+                state.scratch["pending_action_id"] = action.action_id
                 state.scratch["pending_action_content"] = completion.content
                 state.history.append({"node": "act", "content": completion.content})
+                self.traces.record_typed_event(
+                    ActionSelectedEvent(
+                        run_id=state.run_id,
+                        sequence=self.traces.next_sequence(state.run_id),
+                        node="act",
+                        action=action,
+                    )
+                )
                 break
             except ActionParseError as exc:
                 parse_error = str(exc)
@@ -482,9 +593,41 @@ class Nodes:
 
     @maybe_traceable("Harness.execute_action", run_type="tool")
     def execute_action(self, state: HarnessState) -> HarnessState:
+        tool_action_payload = state.scratch.pop("pending_tool_action", None)
+        if tool_action_payload:
+            action = parse_action(tool_action_payload)
+            observation = ToolExecutor(
+                Path(state.workspace),
+                autonomy=self.runtime.autonomy,
+            ).execute(action)
+            rendered = render_typed_observation(observation)
+            state.scratch["last_action"] = rendered
+            if isinstance(action, CompleteTaskAction):
+                state.scratch["action_completed"] = True
+            state.history.append({"node": "execute_action", "content": rendered})
+            self.traces.record_typed_event(
+                ObservationRecordedEvent(
+                    run_id=state.run_id,
+                    sequence=self.traces.next_sequence(state.run_id),
+                    node="execute_action",
+                    observation=observation,
+                )
+            )
+            self.traces.event(
+                state.run_id,
+                "tool_execution",
+                {
+                    "action": action.model_dump(mode="json"),
+                    "observation": observation.model_dump(mode="json"),
+                },
+                node="execute_action",
+            )
+            return state
+
         code = state.scratch.pop("pending_action_code", None)
         if not code:
             return state
+        action_id = state.scratch.pop("pending_action_id", None)
 
         sandbox_config = self.runtime.sandbox_config or SandboxConfig(
             workspace=Path(state.workspace)
@@ -527,6 +670,18 @@ class Nodes:
             "sandbox_execution",
             observation,
             node="execute_action",
+        )
+        self.traces.record_typed_event(
+            ObservationRecordedEvent(
+                run_id=state.run_id,
+                sequence=self.traces.next_sequence(state.run_id),
+                node="execute_action",
+                observation=command_observation_from_payload(
+                    action_id,
+                    "python_repl",
+                    observation,
+                ),
+            )
         )
         return state
 
@@ -621,6 +776,48 @@ class Nodes:
             ),
         ]
 
+    def _tool_action_messages(self, state: HarnessState, parse_error: str = "") -> list[Msg]:
+        retry = ""
+        if parse_error:
+            retry = (
+                "\n\nYour previous response could not be parsed: "
+                f"{parse_error}. Return only valid JSON now."
+            )
+        plan_text = format_plan_context(state.plan)
+        tool_catalog = json.dumps(
+            executable_tool_payload(self.runtime.autonomy),
+            indent=2,
+            sort_keys=True,
+        )
+        return [
+            Msg(
+                role="system",
+                content=(
+                    "You are the typed action node for a coding-agent harness. "
+                    "Return exactly one JSON object and no markdown. "
+                    "The object must be one executable action with a `kind` field. "
+                    "Use only the listed tool action kinds and parameters. "
+                    "Prefer project_summary for project-orientation questions, "
+                    "project_audit for gap/risk/review questions, and complete_task "
+                    "when the task is already complete from recent observations. "
+                    "For risky edits, use propose_file_change before applying changes. "
+                    f"Autonomy mode: {self.runtime.autonomy.value}. "
+                    f"Executable tools allowed in this mode:\n{tool_catalog}"
+                ),
+            ),
+            Msg(
+                role="user",
+                content=(
+                    "Return one typed action JSON object.\n"
+                    f"Task: {state.task}\nPlan progress:\n{plan_text}"
+                    f"{self._recent_history_context(state)}"
+                    f"{self._memory_context(state)}"
+                    f"{self._taste_context(state)}"
+                    f"{self._recovery_context(state)}{retry}"
+                ),
+            ),
+        ]
+
     @maybe_traceable("Harness.observe", run_type="chain")
     def observe(self, state: HarnessState) -> HarnessState:
         observation = state.scratch.get("last_action", "")
@@ -680,6 +877,19 @@ class Nodes:
 
         observation_status = parse_observation_status(last_observation)
         if observation_status and observation_status != "ok":
+            if observation_status == "permission_denied":
+                state.status = "error"
+                state.final_answer = final_answer_from_action(last_observation, task=state.task)
+                self.traces.event(
+                    state.run_id,
+                    "reflection",
+                    {
+                        "decision": "error",
+                        "content": "tool action denied by autonomy policy",
+                    },
+                    node="reflect",
+                )
+                return state
             category = ErrorClassifier.classify(
                 observation_status,
                 observation_user_output(observation_payload or {}),
@@ -997,6 +1207,22 @@ class Nodes:
             },
             node="verify",
         )
+        self.traces.record_typed_event(
+            VerificationEvent(
+                run_id=state.run_id,
+                sequence=self.traces.next_sequence(state.run_id),
+                node="verify",
+                status=verification_status_from_result(result),
+                checks=[
+                    {
+                        "check_type": c.check_type,
+                        "passed": c.passed,
+                        "command": c.command,
+                    }
+                    for c in result.checks
+                ],
+            )
+        )
         return state
 
     def finalize_partial(self, state: HarnessState) -> HarnessState:
@@ -1198,6 +1424,21 @@ class Nodes:
             {"final_answer": state.final_answer},
             node="done",
         )
+        completion_action = CompleteTaskAction(
+            summary=state.final_answer,
+            status=CompletionStatus.SUCCESS,
+            verification=(
+                verification_result_summary(state.scratch.get("verification_result")) or None
+            ),
+        )
+        self.traces.record_typed_event(
+            CompletionEvent.from_action(
+                run_id=state.run_id,
+                sequence=self.traces.next_sequence(state.run_id),
+                node="done",
+                action=completion_action,
+            )
+        )
         return state
 
 
@@ -1242,6 +1483,42 @@ def verification_result_summary(verification: object) -> str:
             line += f": {output[:500]}"
         lines.append(line)
     return "\n".join(lines)
+
+
+def command_observation_from_payload(
+    action_id: Optional[str],
+    command: str,
+    payload: dict,
+) -> CommandObservation:
+    status = observation_status_from_payload(payload)
+    return CommandObservation(
+        action_id=action_id,
+        command=command,
+        exit_code=0 if status == ObservationStatus.OK else 1,
+        stdout=str(payload.get("stdout") or ""),
+        stderr=str(payload.get("stderr") or ""),
+        duration_ms=int(payload.get("elapsed_ms") or 0),
+        status=status,
+        summary=str(payload.get("status") or ""),
+    )
+
+
+def observation_status_from_payload(payload: dict) -> ObservationStatus:
+    status = str(payload.get("status") or "").lower()
+    if payload.get("timed_out"):
+        return ObservationStatus.TIMEOUT
+    if status == "ok":
+        return ObservationStatus.OK
+    if status in {"denied", "permission_denied"}:
+        return ObservationStatus.DENIED
+    return ObservationStatus.ERROR
+
+
+def verification_status_from_result(result: VerificationResult) -> VerificationStatus:
+    summary = result.summary.lower()
+    if "skipped" in summary or "could not" in summary:
+        return VerificationStatus.UNVERIFIED
+    return VerificationStatus.VERIFIED if result.passed else VerificationStatus.FAILED
 
 
 def parse_observation_status(observation: str) -> Optional[str]:
@@ -1319,7 +1596,9 @@ def parse_structured_output(output: str):
 
 
 def render_tool_list() -> str:
-    return ", ".join(str(schema["name"]) for schema in TOOL_SCHEMAS)
+    registry = default_tool_registry()
+    executable_names = set(sandbox_tools.tool_names())
+    return ", ".join(name for name in registry.names() if name in executable_names)
 
 
 def rlm_action_context(state: HarnessState, mount_path: str = "/workspace") -> dict:

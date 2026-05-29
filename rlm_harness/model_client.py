@@ -62,6 +62,8 @@ class LMClient:
             content = "1. Inspect the task.\n2. Produce a concise response.\n3. Record the result."
         elif lower.lstrip().startswith("summarize older harness history."):
             content = self._stub_summary(user_text)
+        elif "return one typed action json object" in lower:
+            content = self._stub_typed_action(user_text)
         elif "task:" in lower and "return only valid json" in lower:
             content = self._stub_action(user_text)
         elif "decide whether the task is complete" in lower:
@@ -178,6 +180,48 @@ class LMClient:
             content = f"Stub action completed for task: {user_text[:200]}"
             code = f"print({content!r})"
         return json.dumps({"type": "python", "code": code}, sort_keys=True)
+
+    def _stub_typed_action(self, user_text: str) -> str:
+        lower = user_text.lower()
+        if is_project_audit_prompt(lower):
+            payload = {"kind": "project_audit"}
+        elif is_project_summary_prompt(lower):
+            payload = {"kind": "project_summary"}
+        elif "fix failing test" in lower or "fix the failing test" in lower:
+            if "patch applied" in lower or "return a + b" in lower:
+                payload = {
+                    "kind": "complete_task",
+                    "summary": (
+                        "Changed files: mathlib.py\n"
+                        "Verification: python -m unittest\n"
+                        "OK"
+                    ),
+                    "status": "success",
+                    "verification": "python -m unittest",
+                }
+            else:
+                payload = {
+                    "kind": "apply_patch",
+                    "diff": (
+                        "diff --git a/mathlib.py b/mathlib.py\n"
+                        "--- a/mathlib.py\n"
+                        "+++ b/mathlib.py\n"
+                        "@@ -1,2 +1,2 @@\n"
+                        " def add(a, b):\n"
+                        "-    return a - b\n"
+                        "+    return a + b\n"
+                    ),
+                    "reason": "Fix the failing addition implementation.",
+                }
+        elif "list files" in lower or "list the files" in lower:
+            payload = {"kind": "list_files", "path": "."}
+        else:
+            payload = {
+                "kind": "complete_task",
+                "summary": f"Stub response for task: {user_text[:200]}",
+                "status": "success",
+            }
+        return json.dumps(payload, sort_keys=True)
 
     @staticmethod
     def _stub_summary(user_text: str) -> str:

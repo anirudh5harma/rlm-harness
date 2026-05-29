@@ -5,11 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from rlm_harness.actions import CompleteTaskAction, CompletionStatus, TextObservation
 from rlm_harness.graph.build import build_graph
 from rlm_harness.graph.nodes import (
     GraphRuntimeConfig,
     Nodes,
     build_final_answer,
+    executable_tool_payload,
     fallback_project_answer_if_needed,
     final_answer_from_action,
     is_code_editing_task,
@@ -23,7 +25,9 @@ from rlm_harness.graph.nodes import (
     normalize_user_output,
     parse_numbered_plan,
     parse_python_action,
+    parse_typed_tool_action,
     render_observation,
+    render_typed_observation,
     rlm_action_context,
 )
 from rlm_harness.graph.task_policy import (
@@ -32,6 +36,12 @@ from rlm_harness.graph.task_policy import (
     looks_like_project_summary_markup_noise,
 )
 from rlm_harness.graph.verification import VerificationGate
+from rlm_harness.kernel import (
+    ActionSelectedEvent,
+    AutonomyMode,
+    CompletionEvent,
+    ObservationRecordedEvent,
+)
 from rlm_harness.memory import Memory, MemoryPagingConfig
 from rlm_harness.memory.evolution import EvolutionProposalStore
 from rlm_harness.model_client import LMClient
@@ -157,6 +167,98 @@ class CapturingClient(LMClient):
         return super().complete(messages, max_tokens=max_tokens, temperature=temperature)
 
 
+class TypedProjectSummaryClient(LMClient):
+    def __init__(self):
+        super().__init__(provider="stub")
+        self.action_calls = 0
+
+    def complete(self, messages, max_tokens=512, temperature=0.2):
+        user_text = ""
+        for message in reversed(list(messages)):
+            if message.role == "user":
+                user_text = message.content
+                break
+
+        if "Return a concise numbered plan" in user_text:
+            content = "1. Summarize the project"
+        elif "Return one typed action JSON object" in user_text:
+            self.action_calls += 1
+            content = '{"kind":"project_summary","max_files":80}'
+        elif "Decide whether the task is complete" in user_text:
+            content = "done"
+        else:
+            content = "done"
+
+        return Completion(
+            content=content,
+            model="typed-summary",
+            provider="test",
+            latency_ms=0,
+        )
+
+
+class BadThenGoodTypedActionClient(LMClient):
+    def __init__(self):
+        super().__init__(provider="stub")
+        self.action_calls = 0
+
+    def complete(self, messages, max_tokens=512, temperature=0.2):
+        user_text = ""
+        for message in reversed(list(messages)):
+            if message.role == "user":
+                user_text = message.content
+                break
+
+        if "Return a concise numbered plan" in user_text:
+            content = "1. Complete the task"
+        elif "Return one typed action JSON object" in user_text:
+            self.action_calls += 1
+            if self.action_calls == 1:
+                content = '{"kind":"record_memory","content":"not executable here"}'
+            else:
+                content = (
+                    '{"kind":"complete_task","summary":"Done via typed tools.",'
+                    '"status":"success","verification":"not needed"}'
+                )
+        elif "Decide whether the task is complete" in user_text:
+            content = "done"
+        else:
+            content = "done"
+
+        return Completion(
+            content=content,
+            model="typed-retry",
+            provider="test",
+            latency_ms=0,
+        )
+
+
+class TypedWriteActionClient(LMClient):
+    def __init__(self):
+        super().__init__(provider="stub")
+
+    def complete(self, messages, max_tokens=512, temperature=0.2):
+        user_text = ""
+        for message in reversed(list(messages)):
+            if message.role == "user":
+                user_text = message.content
+                break
+
+        if "Return a concise numbered plan" in user_text:
+            content = "1. Try to write a file"
+        elif "Return one typed action JSON object" in user_text:
+            content = '{"kind":"write_file","path":"notes.txt","content":"nope\\n"}'
+        else:
+            content = "done"
+
+        return Completion(
+            content=content,
+            model="typed-write",
+            provider="test",
+            latency_ms=0,
+        )
+
+
 class GraphTests(unittest.TestCase):
     def test_parse_numbered_plan(self):
         plan = parse_numbered_plan("1. Inspect\n2. Act")
@@ -171,6 +273,47 @@ class GraphTests(unittest.TestCase):
     def test_parse_python_action_accepts_fenced_json(self):
         code = parse_python_action('```json\n{"type": "python", "code": "print(7)"}\n```')
         self.assertEqual(code, "print(7)")
+
+    def test_parse_typed_tool_action_accepts_direct_action_object(self):
+        action = parse_typed_tool_action('{"kind": "project_summary", "max_files": 20}')
+
+        self.assertEqual(action.kind, "project_summary")
+        self.assertEqual(action.max_files, 20)
+
+    def test_parse_typed_tool_action_accepts_tool_wrapper(self):
+        action = parse_typed_tool_action(
+            '{"type":"tool","name":"complete_task","summary":"Done","status":"success"}'
+        )
+
+        self.assertIsInstance(action, CompleteTaskAction)
+        self.assertEqual(action.summary, "Done")
+
+    def test_parse_typed_tool_action_rejects_host_only_action(self):
+        with self.assertRaisesRegex(Exception, "not executable"):
+            parse_typed_tool_action('{"kind":"record_memory","content":"remember this"}')
+
+    def test_ask_autonomy_catalog_is_read_only(self):
+        names = {tool["name"] for tool in executable_tool_payload(AutonomyMode.ASK)}
+
+        self.assertIn("project_summary", names)
+        self.assertIn("complete_task", names)
+        self.assertNotIn("write_file", names)
+        self.assertNotIn("run_shell", names)
+        self.assertNotIn("propose_file_change", names)
+
+    def test_render_typed_observation_preserves_legacy_stdout_shape(self):
+        rendered = render_typed_observation(
+            TextObservation(
+                action_id="act_1",
+                text="Done via typed tools.",
+                summary=CompletionStatus.SUCCESS.value,
+            )
+        )
+
+        payload = json.loads(rendered)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["stdout"], "Done via typed tools.")
+        self.assertEqual(payload["observation_kind"], "text")
 
     def test_final_answer_uses_sandbox_output_not_raw_observation(self):
         answer = final_answer_from_action(
@@ -1204,6 +1347,94 @@ class GraphTests(unittest.TestCase):
             graph = build_graph(nodes, backend="langgraph")
             final_state = graph.invoke(state)
             self.assertEqual(final_state.status, "done")
+
+    def test_tool_action_engine_runs_project_summary_without_docker(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "README.md").write_text(
+                "# Typed Harness\n\nProduction coding harness.\n",
+                encoding="utf-8",
+            )
+            (workspace / "pyproject.toml").write_text(
+                '[project]\nname = "typed-harness"\n',
+                encoding="utf-8",
+            )
+            traces = TraceStore(workspace / "traces.db")
+            run_id = traces.start_run("what is this project", str(workspace))
+            state = HarnessState(
+                task="what is this project",
+                workspace=str(workspace),
+                thread_id=run_id,
+                run_id=run_id,
+            )
+            client = TypedProjectSummaryClient()
+            runtime = GraphRuntimeConfig(
+                sandbox_enabled=True,
+                act_engine="tool",
+                max_iterations=3,
+            )
+            graph = build_graph(Nodes(client, traces, runtime), backend="simple")
+            final_state = graph.invoke(state)
+            typed_events = traces.typed_events(run_id)
+
+        self.assertEqual(final_state.status, "done")
+        self.assertEqual(client.action_calls, 1)
+        self.assertIn("Project Summary", final_state.final_answer)
+        self.assertTrue(any(isinstance(event, ActionSelectedEvent) for event in typed_events))
+        self.assertTrue(any(isinstance(event, ObservationRecordedEvent) for event in typed_events))
+        self.assertTrue(any(isinstance(event, CompletionEvent) for event in typed_events))
+
+    def test_tool_action_engine_retries_non_executable_action(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            traces = TraceStore(workspace / "traces.db")
+            run_id = traces.start_run("finish with typed tool", str(workspace))
+            state = HarnessState(
+                task="finish with typed tool",
+                workspace=str(workspace),
+                thread_id=run_id,
+                run_id=run_id,
+            )
+            client = BadThenGoodTypedActionClient()
+            runtime = GraphRuntimeConfig(
+                sandbox_enabled=True,
+                act_engine="tool",
+                max_action_retries=1,
+                max_iterations=3,
+            )
+            graph = build_graph(Nodes(client, traces, runtime), backend="simple")
+            final_state = graph.invoke(state)
+            report = traces.render_report(run_id)
+
+        self.assertEqual(final_state.status, "done")
+        self.assertEqual(client.action_calls, 2)
+        self.assertIn("Done via typed tools.", final_state.final_answer)
+        self.assertIn("action_parse_error", report)
+
+    def test_tool_action_engine_enforces_ask_read_only_mode(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            traces = TraceStore(workspace / "traces.db")
+            run_id = traces.start_run("write a file", str(workspace))
+            state = HarnessState(
+                task="write a file",
+                workspace=str(workspace),
+                thread_id=run_id,
+                run_id=run_id,
+            )
+            runtime = GraphRuntimeConfig(
+                sandbox_enabled=True,
+                act_engine="tool",
+                autonomy=AutonomyMode.ASK,
+                max_iterations=3,
+            )
+            graph = build_graph(Nodes(TypedWriteActionClient(), traces, runtime), backend="simple")
+            final_state = graph.invoke(state)
+            wrote_file = (workspace / "notes.txt").exists()
+
+        self.assertEqual(final_state.status, "error")
+        self.assertFalse(wrote_file)
+        self.assertIn("read-only", final_state.final_answer)
 
     @unittest.skipUnless(docker_available(), "Docker daemon is not available")
     def test_stub_graph_lists_workspace_through_sandbox(self):
