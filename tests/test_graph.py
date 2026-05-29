@@ -230,6 +230,36 @@ class NonJsonProjectSummaryClient(LMClient):
         )
 
 
+class NonJsonGenericInfoClient(LMClient):
+    def __init__(self):
+        super().__init__(provider="stub")
+        self.action_calls = 0
+
+    def complete(self, messages, max_tokens=512, temperature=0.2):
+        user_text = ""
+        for message in reversed(list(messages)):
+            if message.role == "user":
+                user_text = message.content
+                break
+
+        if "Return a concise numbered plan" in user_text:
+            content = "1. Inspect the architecture\n2. Suggest next steps"
+        elif "Return one typed action JSON object" in user_text:
+            self.action_calls += 1
+            content = "I should inspect the workspace before answering."
+        elif "Decide whether the task is complete" in user_text:
+            content = "done"
+        else:
+            content = "done"
+
+        return Completion(
+            content=content,
+            model="non-json-generic-info",
+            provider="test",
+            latency_ms=0,
+        )
+
+
 class ActionKindProjectSummaryClient(LMClient):
     def __init__(self):
         super().__init__(provider="stub")
@@ -2652,6 +2682,50 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(client.action_calls, 1)
         self.assertIn("Project Summary", final_state.final_answer)
         self.assertIn("fallback summaries", final_state.final_answer)
+        self.assertIn("action_parse_recovered", report)
+
+    def test_tool_action_engine_falls_back_for_generic_info_parse_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "README.md").write_text(
+                "# Architecture Notes\n\nA Python service with a CLI entrypoint.\n",
+                encoding="utf-8",
+            )
+            (workspace / "pyproject.toml").write_text(
+                "[project]\nname = \"architecture-notes\"\n",
+                encoding="utf-8",
+            )
+            (workspace / "src").mkdir()
+            (workspace / "src" / "cli.py").write_text(
+                "def main():\n    print('hello')\n",
+                encoding="utf-8",
+            )
+            traces = TraceStore(workspace / "traces.db")
+            task = "analyze the architecture and suggest next steps"
+            run_id = traces.start_run(task, str(workspace))
+            state = HarnessState(
+                task=task,
+                workspace=str(workspace),
+                thread_id=run_id,
+                run_id=run_id,
+            )
+            client = NonJsonGenericInfoClient()
+            runtime = GraphRuntimeConfig(
+                sandbox_enabled=True,
+                act_engine="tool",
+                max_action_retries=0,
+                max_iterations=3,
+            )
+            graph = build_graph(Nodes(client, traces, runtime), backend="simple")
+            final_state = graph.invoke(state)
+            report = traces.render_report(run_id)
+
+        self.assertEqual(final_state.status, "done")
+        self.assertEqual(client.action_calls, 1)
+        self.assertIn("Project Summary", final_state.final_answer)
+        self.assertIn("architecture-notes", final_state.final_answer)
+        self.assertIn("Python service with a CLI entrypoint", final_state.final_answer)
+        self.assertNotIn("action was not valid JSON", final_state.final_answer)
         self.assertIn("action_parse_recovered", report)
 
     def test_tool_action_engine_accepts_action_kind_alias_from_provider(self):

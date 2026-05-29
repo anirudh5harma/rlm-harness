@@ -1603,7 +1603,12 @@ def build_final_answer(
 
 
 def fallback_typed_action_for_task(task: str):
-    return deterministic_typed_action_for_task(task)
+    action = deterministic_typed_action_for_task(task)
+    if action is not None:
+        return action
+    if is_informational_task(task) and not is_code_editing_task(task):
+        return ProjectOverviewAction(max_files=300, max_read_bytes=64_000)
+    return None
 
 
 def deterministic_typed_action_for_task(task: str):
