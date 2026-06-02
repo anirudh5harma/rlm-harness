@@ -21,6 +21,25 @@ class Completion(BaseModel):
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
+class TokenEvent(BaseModel):
+    """A single event in a streaming completion.
+
+    A stream is: one `start`, then 0+ `delta` events whose concatenated
+    `delta` fields equal the full assistant message, then exactly one
+    `finish`. `error` events replace `finish` on failure. `tool_call`
+    is reserved for provider-native tool calling (Phase C).
+    """
+
+    type: str  # "start" | "delta" | "tool_call" | "finish" | "error"
+    delta: str = ""
+    model: Optional[str] = None
+    provider: Optional[str] = None
+    usage: dict[str, Any] = Field(default_factory=dict)
+    finish_reason: Optional[str] = None
+    tool_call: Optional[dict[str, Any]] = None
+    error: Optional[str] = None
+
+
 class PlanStepStatus(str, Enum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"

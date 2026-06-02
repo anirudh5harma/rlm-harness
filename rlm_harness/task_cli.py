@@ -147,7 +147,7 @@ def add_run_args(
     command.add_argument(
         "--graph-backend",
         default="auto",
-        choices=["auto", "simple", "langgraph"],
+        choices=["auto", "simple", "langgraph", "supervisor"],
         help=argparse.SUPPRESS,
     )
     command.add_argument(

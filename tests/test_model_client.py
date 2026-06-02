@@ -13,7 +13,14 @@ class FakeResponse:
     status = 200
 
     def __init__(self, content: str = "hello"):
-        self.content = content
+        body = json.dumps(
+            {
+                "model": "test-model",
+                "choices": [{"message": {"content": content}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+            }
+        )
+        self._buffer = body.encode("utf-8")
 
     def __enter__(self):
         return self
@@ -21,14 +28,20 @@ class FakeResponse:
     def __exit__(self, exc_type, exc, tb):
         return None
 
-    def read(self):
-        return json.dumps(
-                    {
-                        "model": "test-model",
-                        "choices": [{"message": {"content": self.content}}],
-                        "usage": {"prompt_tokens": 3, "completion_tokens": 1},
-                    }
-                ).encode("utf-8")
+    def read(self, amt: int = -1):
+        """Behave like a real HTTPResponse.
+
+        With `amt == -1` (default), return the entire buffered body.
+        With `amt > 0`, return up to `amt` bytes and drain the buffer,
+        so the next call returns `b""` and the streaming loop can
+        terminate.
+        """
+        if amt is None or amt < 0:
+            data, self._buffer = self._buffer, b""
+            return data
+        data = self._buffer[:amt]
+        self._buffer = self._buffer[amt:]
+        return data
 
 
 class LMClientTests(unittest.TestCase):

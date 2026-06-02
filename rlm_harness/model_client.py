@@ -5,13 +5,13 @@ import re
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Optional
 
 from rlm_harness.graph.task_policy import normalize_task_text
 from rlm_harness.observability import maybe_traceable
-from rlm_harness.types import Completion, Msg
+from rlm_harness.types import Completion, Msg, TokenEvent
 
 USER_AGENT = "rlm-harness/0.1 (+https://github.com/anirudh5harma/rlm-harness)"
 
@@ -35,6 +35,15 @@ class LMClient:
         max_tokens: int = 512,
         temperature: float = 0.2,
     ) -> Completion:
+        """Non-streaming completion.
+
+        Kept as a separate implementation from `stream()` because the
+        non-streaming path has battle-tested retry logic (the
+        `response_format` fallback) that is awkward to express in a
+        streaming generator. `stream()` is the new path used by the
+        RLM runtime; both share payload construction and SSE
+        helpers.
+        """
         started = time.perf_counter()
         messages_list = list(messages)
 
@@ -46,6 +55,26 @@ class LMClient:
             max_tokens=max_tokens,
             temperature=temperature,
             started=started,
+        )
+
+    def stream(
+        self,
+        messages: Iterable[Msg],
+        max_tokens: int = 512,
+        temperature: float = 0.2,
+    ) -> Iterator[TokenEvent]:
+        """Stream a completion as a sequence of `TokenEvent`s.
+
+        Always yields one `start` event first, then 0+ `delta` events,
+        then exactly one `finish` (or `error`) event last. The
+        non-streaming `complete()` is implemented in terms of this.
+        """
+        messages_list = list(messages)
+        if self.provider == "stub":
+            yield from self._stub_stream(messages_list)
+            return
+        yield from self._openai_compatible_stream(
+            messages_list, max_tokens=max_tokens, temperature=temperature
         )
 
     def _stub_complete(self, messages: list[Msg], started: float) -> Completion:
@@ -301,6 +330,187 @@ class LMClient:
             completion_tokens=usage.get("completion_tokens"),
             raw=raw,
         )
+
+    def _stub_stream(self, messages: list[Msg]) -> Iterator[TokenEvent]:
+        """Stub streaming path. Yields one `delta` containing the full
+        stub response. Kept simple on purpose: the stub is a test
+        fixture, not a streaming benchmark.
+        """
+        yield TokenEvent(type="start", model=self.model, provider=self.provider)
+        completion = self._stub_complete(messages, time.perf_counter())
+        yield TokenEvent(
+            type="delta",
+            delta=completion.content,
+            model=completion.model,
+            provider=completion.provider,
+        )
+        yield TokenEvent(
+            type="finish",
+            model=completion.model,
+            provider=completion.provider,
+            usage={
+                "prompt_tokens": completion.prompt_tokens or 0,
+                "completion_tokens": completion.completion_tokens or 0,
+            },
+            finish_reason="stop",
+        )
+
+    def _openai_compatible_stream(
+        self,
+        messages: list[Msg],
+        max_tokens: int,
+        temperature: float,
+    ) -> Iterator[TokenEvent]:
+        """Streaming path for OpenAI-compatible `/chat/completions`.
+
+        Sends `stream: true`, parses Server-Sent Events of the form
+        `data: {json}\n\n`, and yields start / delta / finish events.
+        Yields exactly one `error` event on failure (the caller in
+        `complete()` translates that to `LMClientError`).
+        """
+        url = self.base_url.rstrip("/") + "/chat/completions"
+        payload = {
+            "model": self.model,
+            "messages": [message.model_dump() for message in messages],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+        }
+        if should_request_json_response(messages):
+            payload["response_format"] = {"type": "json_object"}
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "User-Agent": USER_AGENT,
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        yield TokenEvent(type="start", model=self.model, provider=self.provider)
+        try:
+            request = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+                for event in self._iter_sse_events(response):
+                    if event is None:
+                        # stream terminator (`data: [DONE]`)
+                        break
+                    kind = event.get("type", "delta")
+                    if kind == "error":
+                        yield TokenEvent(
+                            type="error",
+                            error=str(event.get("error") or "stream error"),
+                            model=event.get("model", self.model),
+                            provider=self.provider,
+                        )
+                        return
+                    if kind == "finish":
+                        yield TokenEvent(
+                            type="finish",
+                            model=event.get("model") or self.model,
+                            provider=self.provider,
+                            usage=event.get("usage", {}),
+                            finish_reason=event.get("finish_reason"),
+                        )
+                        return
+                    if kind == "delta":
+                        yield TokenEvent(
+                            type="delta",
+                            delta=str(event.get("delta") or ""),
+                            model=event.get("model", self.model),
+                            provider=self.provider,
+                        )
+        except urllib.error.HTTPError as exc:
+            detail = _read_http_error_detail(exc)
+            message = f"model stream failed: HTTP {exc.code} {exc.reason}"
+            if detail:
+                message = f"{message}: {detail}"
+            yield TokenEvent(type="error", error=message, provider=self.provider)
+            return
+        except (json.JSONDecodeError, urllib.error.URLError) as exc:
+            yield TokenEvent(type="error", error=str(exc), provider=self.provider)
+            return
+
+        # Provider closed the stream without an explicit finish event.
+        # Emit one so the contract (`start` then `finish`) is preserved.
+        yield TokenEvent(
+            type="finish",
+            model=self.model,
+            provider=self.provider,
+            usage={},
+            finish_reason="stop",
+        )
+
+    @staticmethod
+    def _iter_sse_events(response) -> Iterator[Optional[dict]]:
+        """Yield one dict per `data: ...` SSE frame from a streaming
+        HTTP response. `None` indicates the `[DONE]` terminator.
+
+        Lines are read in small chunks so that the body of a large
+        response does not have to be buffered all at once. Newline
+        separators inside a JSON payload are not allowed by SSE, so a
+        `\n` boundary is safe.
+        """
+        buffer = ""
+        for raw_chunk in iter(lambda: response.read(4096).decode("utf-8", "replace"), ""):
+            buffer += raw_chunk
+            while "\n\n" in buffer:
+                frame, buffer = buffer.split("\n\n", 1)
+                for line in frame.splitlines():
+                    line = line.strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    payload = line[len("data:") :].strip()
+                    if payload == "[DONE]":
+                        yield None
+                        return
+                    if not payload:
+                        continue
+                    try:
+                        parsed = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                    yield _sse_to_token_event(parsed)
+
+
+def _sse_to_token_event(payload: dict) -> dict:
+    """Translate an OpenAI streaming chunk into our internal shape.
+
+    The OpenAI streaming schema is the de-facto standard for
+    OpenAI-compatible providers; we accept the schema as-is and only
+    normalise the bits we care about.
+    """
+    if not isinstance(payload, dict):
+        return {"type": "delta", "delta": ""}
+    choices = payload.get("choices") or []
+    if not choices:
+        # Some providers send `usage` in a final chunk with no choices.
+        if "usage" in payload:
+            return {
+                "type": "finish",
+                "usage": payload.get("usage", {}),
+                "model": payload.get("model"),
+            }
+        return {"type": "delta", "delta": ""}
+    choice = choices[0] if isinstance(choices[0], dict) else {}
+    delta = choice.get("delta") or {}
+    text = ""
+    if isinstance(delta, dict):
+        text = str(delta.get("content") or "")
+    elif isinstance(delta, str):
+        text = delta
+    finish_reason = choice.get("finish_reason")
+    out: dict = {"type": "delta", "delta": text}
+    if finish_reason or "usage" in payload:
+        out["type"] = "finish"
+        out["finish_reason"] = finish_reason
+        out["usage"] = payload.get("usage", {})
+        out["model"] = payload.get("model")
+    return out
 
 
 def should_request_json_response(messages: list[Msg]) -> bool:

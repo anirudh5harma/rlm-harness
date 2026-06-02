@@ -21,10 +21,19 @@ from rlm_harness.config import default_provider
 from rlm_harness.graph.build import build_graph
 from rlm_harness.graph.nodes import GraphRuntimeConfig, Nodes
 from rlm_harness.kernel import AutonomyMode, CompletionEvent, RunStartedEvent
+from rlm_harness.kernel.state import (
+    RunState,
+)
+from rlm_harness.kernel.supervisor import (
+    Supervisor,
+    SupervisorConfig,
+    page_history_between_turns,
+)
 from rlm_harness.mcp_config import MCP_CONFIG_PATH, MCPConfigStore, mcp_workflow_context
 from rlm_harness.memory import Memory, MemoryError, MemoryPagingConfig
 from rlm_harness.model_client import LMClientError
 from rlm_harness.providers import normalize_provider
+from rlm_harness.rlm import RLMRuntime
 from rlm_harness.runtime_cli import build_client
 from rlm_harness.sandbox import RLMSubcallConfig, SandboxConfig, SandboxError
 from rlm_harness.tracing import TraceStore
@@ -314,19 +323,37 @@ def run_task(
             )
             runtime = build_runtime(args, workspace, memory, profile_memory, task)
             console.marker("graph", "preparing runtime")
-            graph = build_graph(
-                Nodes(build_client(args), traces, runtime),
-                backend=args.graph_backend,
-                checkpoint_path=checkpoint_path(args),
-            )
-            if args.stream:
-                final_state = run_streaming_graph(graph, state)
-            elif console.enabled and hasattr(graph, "stream"):
-                final_state = run_marked_graph(graph, state, console)
+            if args.graph_backend == "supervisor":
+                # The supervisor is the new control plane (Phase A).
+                # It runs the RLM runtime per turn, pages memory
+                # between turns, and emits typed events to the
+                # trace. Returns a `HarnessState` for the rest of
+                # the CLI.
+                console.marker("supervisor", "running RLM turns")
+                final_state = run_supervisor_graph(
+                    args,
+                    task,
+                    thread_id,
+                    workspace,
+                    build_client(args),
+                    traces,
+                    memory,
+                    profile_memory,
+                )
             else:
-                console.marker("agent", "working through the request")
-                final_state = graph.invoke(state)
-            close_graph(graph)
+                graph = build_graph(
+                    Nodes(build_client(args), traces, runtime),
+                    backend=args.graph_backend,
+                    checkpoint_path=checkpoint_path(args),
+                )
+                if args.stream:
+                    final_state = run_streaming_graph(graph, state)
+                elif console.enabled and hasattr(graph, "stream"):
+                    final_state = run_marked_graph(graph, state, console)
+                else:
+                    console.marker("agent", "working through the request")
+                    final_state = graph.invoke(state)
+                close_graph(graph)
         traces.finish_run(run_id, final_state.status)
     except (LMClientError, MemoryError, SandboxError) as exc:
         console.error(str(exc))
@@ -696,3 +723,88 @@ def close_graph(graph) -> None:
     close = getattr(graph, "close", None)
     if callable(close):
         close()
+
+
+# --- Supervisor runner (Phase A.5) ---------------------------------------
+# The supervisor is the new control plane. The existing graph runners
+# in `graph/build.py` are preserved for backward compatibility; this
+# module exposes the supervisor as a `--graph-backend supervisor`
+# option that produces a `HarnessState` so the rest of the CLI works
+# unchanged. The adapter is intentionally narrow: it converts the
+# legacy `HarnessState` to the kernel `RunState`, runs the
+# supervisor, and converts the result back.
+
+
+def run_supervisor_graph(
+    args: argparse.Namespace,
+    task: str,
+    thread_id: Optional[str],
+    workspace: Path,
+    client,
+    traces: TraceStore,
+    memory: Optional[Memory],
+    profile_memory: Optional[Memory],
+) -> HarnessState:
+    """Run the supervisor as the control plane.
+
+    Returns a `HarnessState` whose `status` is the harness status
+    string. Emits the same `RunStartedEvent` and `CompletionEvent`
+    the legacy graph runner emits, so the trace and the CLI output
+    match the existing contract.
+    """
+    run_id = traces.start_run(task, str(workspace), thread_id=thread_id)
+    sandbox_config = SandboxConfig(
+        image=args.sandbox_image,
+        workspace=workspace,
+        memory=args.sandbox_memory,
+        cpus=args.sandbox_cpus,
+        default_timeout_s=args.sandbox_timeout,
+    )
+    subcall_config = RLMSubcallConfig(
+        max_depth=args.max_depth,
+        max_subcalls=args.max_subcalls,
+        token_budget=args.token_budget,
+        max_tokens=args.subcall_max_tokens,
+    )
+    # `max_iterations` is per-turn model-call count (the RLM runtime
+    # already enforces it). The supervisor adds `max_turns` on top.
+    max_iterations = max(1, int(getattr(args, "max_iterations", 8) or 8))
+    max_turns = max(1, int(getattr(args, "max_turns", 50) or 50))
+    max_subcalls_per_turn = max(
+        1, int(getattr(args, "max_subcalls_per_turn", 8) or 8)
+    )
+    runtime = RLMRuntime(
+        client,
+        workspace=workspace,
+        max_iterations=max_iterations,
+        max_depth=subcall_config.max_depth,
+        sandbox_enabled=not args.no_sandbox,
+        sandbox_config=sandbox_config,
+        subcall_config=subcall_config,
+    )
+    record_run_started_event(args, traces, run_id, task, workspace, thread_id)
+    state = HarnessState(
+        task=task,
+        workspace=str(workspace),
+        thread_id=thread_id or run_id,
+        run_id=run_id,
+        token_budget=args.token_budget,
+    )
+    run_state = RunState.from_harness_state(state)
+    config = SupervisorConfig(
+        max_turns=max_turns,
+        max_subcalls_per_turn=max_subcalls_per_turn,
+        between_turns=(
+            page_history_between_turns(memory)
+            if memory is not None
+            else None
+        ),
+    )
+    supervisor = Supervisor(
+        runtime=runtime,
+        traces=traces,
+        config=config,
+    )
+    final = supervisor.run(run_state)
+    harness_state = final.to_harness_state()
+    return harness_state

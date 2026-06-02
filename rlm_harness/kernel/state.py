@@ -32,6 +32,8 @@ class RunPhase(str, Enum):
     DONE = "done"
     FAILED = "failed"
     BLOCKED = "blocked"
+    STOPPED = "stopped"
+    UNVERIFIED = "unverified"
 
 
 class RunRequest(BaseModel):
@@ -68,12 +70,29 @@ class RunState(BaseModel):
     context: RunContext = Field(default_factory=RunContext)
     events: list[AnyRunEvent] = Field(default_factory=list)
     event_cursor: int = 0
+    history: list[dict[str, Any]] = Field(default_factory=list)
     changed_files: list[str] = Field(default_factory=list)
     artifacts: list[dict[str, Any]] = Field(default_factory=list)
     verification: Optional[dict[str, Any]] = None
     final_answer: Optional[str] = None
     budget: ExecutionBudget = Field(default_factory=ExecutionBudget)
     scratch: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def thread_id(self) -> str:
+        return self.request.thread_id or self.request.run_id or ""
+
+    @property
+    def run_id(self) -> str:
+        return self.request.run_id or ""
+
+    @property
+    def task(self) -> str:
+        return self.request.task
+
+    @property
+    def workspace(self) -> str:
+        return self.request.workspace
 
     @classmethod
     def from_harness_state(cls, state: HarnessState) -> RunState:
@@ -86,6 +105,7 @@ class RunState(BaseModel):
             ),
             phase=run_phase_from_status(state.status),
             plan=state.plan,
+            history=list(state.history),
             final_answer=state.final_answer,
             budget=state.budget,
             scratch=dict(state.scratch),
@@ -100,6 +120,7 @@ class RunState(BaseModel):
             thread_id=thread_id,
             run_id=run_id,
             plan=self.plan,
+            history=list(self.history),
             scratch=dict(self.scratch),
             budget=self.budget,
             status=harness_status_from_phase(self.phase),
@@ -114,6 +135,10 @@ def run_phase_from_status(status: str) -> RunPhase:
         return RunPhase.FAILED
     if status == "blocked":
         return RunPhase.BLOCKED
+    if status == "stopped":
+        return RunPhase.STOPPED
+    if status == "unverified":
+        return RunPhase.UNVERIFIED
     return RunPhase.NEW
 
 
@@ -124,4 +149,8 @@ def harness_status_from_phase(phase: RunPhase) -> str:
         return "failed"
     if phase == RunPhase.BLOCKED:
         return "blocked"
+    if phase == RunPhase.STOPPED:
+        return "stopped"
+    if phase == RunPhase.UNVERIFIED:
+        return "unverified"
     return "new"

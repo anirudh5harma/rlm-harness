@@ -1,5 +1,6 @@
 """Tiered memory store for RLM Harness."""
 
+from rlm_harness.memory.audit import PhaseAudit, write_decision
 from rlm_harness.memory.embed import Embedder, HashingEmbedder, SentenceTransformerEmbedder
 from rlm_harness.memory.evolution import (
     EvolutionProposal,
@@ -40,6 +41,7 @@ __all__ = [
     "MemoryPagingConfig",
     "MemorySearchResult",
     "MemoryValidationError",
+    "PhaseAudit",
     "RecallEvent",
     "SentenceTransformerEmbedder",
     "TasteProfileManager",
@@ -47,4 +49,5 @@ __all__ = [
     "TasteRecord",
     "infer_evolution_from_feedback",
     "infer_taste_from_feedback",
+    "write_decision",
 ]

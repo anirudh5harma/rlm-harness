@@ -4,10 +4,12 @@ import contextlib
 import io
 import json
 import re
+import time
 import traceback
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from rlm_harness.model_client import LMClient
 from rlm_harness.sandbox import (
@@ -26,6 +28,7 @@ REPL_BLOCK_RE = re.compile(
 )
 MAX_OBSERVATION_CODE_CHARS = 8_000
 MAX_OBSERVATION_STREAM_CHARS = 12_000
+CONTEXT_PREVIEW_CHARS = 2000
 
 
 @dataclass
@@ -49,6 +52,94 @@ class RLMResult:
     responses: list[str] = field(default_factory=list)
     subcalls: int = 0
     tokens_used: int = 0
+
+
+# --- Streaming turn events (Phase A.2) ---------------------------------
+# The supervisor consumes these. They are intentionally narrow and
+# append-only; the supervisor is the only writer of state, and the
+# events are the audit trail it writes from.
+
+
+@dataclass
+class TurnStarted:
+    """Emitted once at the start of a turn."""
+
+    query: str
+    context_preview: str
+    iteration_limit: int
+
+
+@dataclass
+class IterationStarted:
+    """Emitted before each model call (within a turn)."""
+
+    iteration: int
+    started_at: float
+
+
+@dataclass
+class TokenDelta:
+    """One streamed token from the model."""
+
+    delta: str
+
+
+@dataclass
+class IterationFinished:
+    """Emitted after a model call. The full response is included so
+    the supervisor can checkpoint without re-reading the stream.
+    """
+
+    iteration: int
+    response: str
+    repl_blocks: list[str]
+    usage: dict
+    latency_ms: int
+
+
+@dataclass
+class ObservationRecorded:
+    """Emitted after each REPL block is executed."""
+
+    observation: RLMObservation
+    iteration: int
+
+
+@dataclass
+class SubcallStarted:
+    """Emitted when a child llm_query / rlm_query starts."""
+
+    kind: str  # "llm" or "rlm"
+    prompt_preview: str
+    depth: int
+
+
+@dataclass
+class SubcallFinished:
+    """Emitted when a child call returns."""
+
+    kind: str
+    content: str
+    tokens_used: int
+
+
+@dataclass
+class TurnFinished:
+    """Emitted once at the end of a turn. Carries the final RLMResult."""
+
+    result: RLMResult
+
+
+RLMTurnEvent = Union[
+    TurnStarted,
+    IterationStarted,
+    TokenDelta,
+    IterationFinished,
+    ObservationRecorded,
+    SubcallStarted,
+    SubcallFinished,
+    TurnFinished,
+]
 
 
 class LocalRLMRepl:
@@ -200,6 +291,245 @@ class RLMRuntime:
         if self.sandbox_enabled:
             return self._completion_with_docker(query, context)
         return self._completion_with_local_repl(query, context)
+
+    def stream_turn(
+        self, query: str, context: Any = ""
+    ) -> Iterator[RLMTurnEvent]:
+        """Run one turn of the RLM runtime, yielding events as they happen.
+
+        A *turn* is the unit of work the supervisor runs: start at the
+        model, observe repl blocks, sub-call as needed, end at a final
+        answer or at the iteration cap. The event stream is the audit
+        trail the supervisor writes into the kernel trace and the
+        memory store. The non-streaming `completion()` is preserved
+        unchanged for callers that want the buffered final result.
+        """
+        preview = serialize_context(context)[:CONTEXT_PREVIEW_CHARS]
+        yield TurnStarted(
+            query=query,
+            context_preview=preview,
+            iteration_limit=self.max_iterations,
+        )
+        if self.sandbox_enabled:
+            yield from self._stream_turn_with_docker(query, context)
+        else:
+            yield from self._stream_turn_with_local_repl(query, context)
+
+    def _stream_turn_with_local_repl(
+        self, query: str, context: Any
+    ) -> Iterator[RLMTurnEvent]:
+        repl = LocalRLMRepl(self, context)
+        messages = self._initial_messages(query, context)
+        responses: list[str] = []
+        observations: list[RLMObservation] = []
+        final: Optional[RLMResult] = None
+
+        for iteration in range(1, self.max_iterations + 1):
+            started_at = time.perf_counter()
+            yield IterationStarted(iteration=iteration, started_at=started_at)
+            response, usage = self._stream_model_call(messages)
+            for delta in self._drain_message_chunks(response):
+                yield TokenDelta(delta=delta)
+            responses.append(response)
+            messages.append(Msg(role="assistant", content=response))
+            blocks = find_repl_blocks(response)
+            yield IterationFinished(
+                iteration=iteration,
+                response=response,
+                repl_blocks=list(blocks),
+                usage=usage,
+                latency_ms=int((time.perf_counter() - started_at) * 1000),
+            )
+            if not blocks:
+                final = RLMResult(
+                    final_answer=response.strip(),
+                    status="done",
+                    iterations=iteration,
+                    observations=observations,
+                    responses=responses,
+                    subcalls=self.subcalls,
+                    tokens_used=self.tokens_used,
+                )
+                break
+            for block in blocks:
+                observation = repl.execute(block)
+                observations.append(observation)
+                yield ObservationRecorded(observation=observation, iteration=iteration)
+                messages.append(
+                    Msg(role="user", content=format_observation(observation))
+                )
+                if repl.final_answer is not None:
+                    final = RLMResult(
+                        final_answer=repl.final_answer,
+                        status="done",
+                        iterations=iteration,
+                        observations=observations,
+                        responses=responses,
+                        subcalls=self.subcalls,
+                        tokens_used=self.tokens_used,
+                    )
+                    break
+            if final is not None:
+                break
+
+        if final is None:
+            final = RLMResult(
+                final_answer=stopped_final_answer(responses, observations),
+                status="stopped",
+                iterations=self.max_iterations,
+                observations=observations,
+                responses=responses,
+                subcalls=self.subcalls,
+                tokens_used=self.tokens_used,
+            )
+        yield TurnFinished(result=final)
+
+    def _stream_turn_with_docker(
+        self, query: str, context: Any
+    ) -> Iterator[RLMTurnEvent]:
+        sandbox_config = self.sandbox_config or SandboxConfig(workspace=self.workspace)
+        bootstrap = build_bootstrap_code(context)
+        messages = self._initial_messages(query, context)
+        responses: list[str] = []
+        observations: list[RLMObservation] = []
+        final: Optional[RLMResult] = None
+
+        try:
+            with DockerREPL(
+                sandbox_config,
+                completion_client=self.client,
+                subcall_config=self.subcall_config,
+                recursive_completion=self._recursive_completion_from_sandbox,
+            ) as repl:
+                repl.execute(bootstrap, timeout_s=sandbox_config.default_timeout_s)
+                for iteration in range(1, self.max_iterations + 1):
+                    started_at = time.perf_counter()
+                    yield IterationStarted(iteration=iteration, started_at=started_at)
+                    response, usage = self._stream_model_call(messages)
+                    for delta in self._drain_message_chunks(response):
+                        yield TokenDelta(delta=delta)
+                    responses.append(response)
+                    messages.append(Msg(role="assistant", content=response))
+                    blocks = find_repl_blocks(response)
+                    yield IterationFinished(
+                        iteration=iteration,
+                        response=response,
+                        repl_blocks=list(blocks),
+                        usage=usage,
+                        latency_ms=int((time.perf_counter() - started_at) * 1000),
+                    )
+                    if not blocks:
+                        final = RLMResult(
+                            response.strip(),
+                            "done",
+                            iteration,
+                            observations,
+                            responses,
+                            self.subcalls,
+                            self.tokens_used,
+                        )
+                        break
+                    for block in blocks:
+                        result = repl.execute(
+                            block, timeout_s=sandbox_config.default_timeout_s
+                        )
+                        observation = observation_from_execution(block, result)
+                        observations.append(observation)
+                        yield ObservationRecorded(
+                            observation=observation, iteration=iteration
+                        )
+                        messages.append(
+                            Msg(role="user", content=format_observation(observation))
+                        )
+                        answer = extract_answer_ready(result.stdout)
+                        if answer is not None:
+                            final = RLMResult(
+                                answer,
+                                "done",
+                                iteration,
+                                observations,
+                                responses,
+                                self.subcalls + result.subcalls,
+                                self.tokens_used + result.tokens_used,
+                            )
+                            break
+                    if final is not None:
+                        break
+        except SandboxError as exc:
+            observations.append(
+                RLMObservation(code="", stderr=str(exc), status="sandbox_error")
+            )
+            final = RLMResult(
+                str(exc),
+                "error",
+                len(responses),
+                observations,
+                responses,
+                self.subcalls,
+                self.tokens_used,
+            )
+
+        if final is None:
+            final = RLMResult(
+                stopped_final_answer(responses, observations),
+                "stopped",
+                self.max_iterations,
+                observations,
+                responses,
+                self.subcalls,
+                self.tokens_used,
+            )
+        yield TurnFinished(result=final)
+
+    def _stream_model_call(self, messages: list[Msg]) -> tuple[str, dict]:
+        """Stream one model call. Returns the full response + usage.
+
+        Uses `client.stream` to deliver incremental token events, and
+        the `maybe_record_usage` helper to keep the runtime's
+        accounting consistent. Sub-calls go through `llm_query` /
+        `rlm_query` which already use the non-streaming path; the
+        streaming entry point is the top-level model call only.
+        """
+        chunks: list[str] = []
+        usage: dict = {}
+        error: Optional[str] = None
+        for event in self.client.stream(
+            messages, max_tokens=self.max_tokens, temperature=0.1
+        ):
+            if event.type == "delta":
+                chunks.append(event.delta)
+            elif event.type == "finish":
+                usage = event.usage or usage
+            elif event.type == "error":
+                error = event.error or "stream error"
+                break
+        if error is not None:
+            # Surface as a sandbox-style error so the supervisor can
+            # classify and recover; do not raise (callers are the
+            # non-streaming `completion()` and the streaming
+            # `stream_turn()`, neither of which is allowed to raise).
+            return f"__rlm_stream_error__:{error}", usage
+        response = "".join(chunks)
+        self._add_usage(usage.get("prompt_tokens"), usage.get("completion_tokens"))
+        return response, usage
+
+    @staticmethod
+    def _drain_message_chunks(response: str) -> list[str]:
+        """Split a buffered response into per-token deltas.
+
+        A real model emits a stream of small deltas; a stub or
+        non-streaming call returns the whole message at once. To keep
+        the event shape uniform (one `TokenDelta` per chunk), the
+        helper tokenises the message on whitespace boundaries so the
+        caller can rebuild the response by concatenation.
+        """
+        if not response:
+            return []
+        # Treat each whitespace-separated token as one delta. This is
+        # a coarse approximation: it is not byte-faithful, but it is
+        # good enough for the supervisor to estimate latency and to
+        # checkpoint at a per-iteration boundary.
+        return [chunk for chunk in re.split(r"(\s+)", response) if chunk]
 
     def _completion_with_local_repl(self, query: str, context: Any) -> RLMResult:
         repl = LocalRLMRepl(self, context)
@@ -405,6 +735,13 @@ class RLMRuntime:
         return result.final_answer
 
     def _initial_messages(self, query: str, context: Any) -> list[Msg]:
+        manifest = manifest_for_context(context)
+        # The manifest is the long-context surface; it is bounded
+        # by the budget in `context.manifest.build_manifest_for_doc`
+        # (default 20k tokens). We do *not* truncate it here: a
+        # half-manifest is worse than no manifest, and the
+        # supervisor can always build a tighter one.
+        manifest_text = serialize_context(manifest)
         return [
             Msg(role="system", content=RLM_SYSTEM_PROMPT),
             Msg(
@@ -412,7 +749,7 @@ class RLMRuntime:
                 content=(
                     f"Query:\n{query}\n\n"
                     "The context is available in the REPL as variable `context`. "
-                    f"Context preview:\n{serialize_context(context)[:2000]}"
+                    f"Context manifest:\n{manifest_text}"
                 ),
             ),
         ]
@@ -514,6 +851,37 @@ def serialize_context(context: Any) -> str:
         return json.dumps(context, sort_keys=True)
     except TypeError:
         return repr(context)
+
+
+def manifest_for_context(context: Any) -> dict:
+    """Return a small manifest describing `context` for the prompt.
+
+    The manifest is what the prompt carries when the model is
+    given a long-context working set. Today this is a thin
+    passthrough that:
+
+    * returns `context` if it is already a dict (legacy callers);
+    * returns the manifest from a `ContextVar`-like object (has a
+      `map()` method) — Phase B's long-context path;
+    * returns `{"_raw": serialize_context(context)}` as a last
+      resort for unknown objects.
+
+    The supervisor (Phase B.4) builds the per-turn manifest from a
+    `ContextVar` and stores it in `state.scratch["context_manifest"]`;
+    the runtime consults that key when it is present.
+    """
+    if context is None:
+        return {"_raw": ""}
+    if isinstance(context, dict):
+        return context
+    # `ContextVar` (Phase B) exposes `map()` returning a manifest.
+    map_method = getattr(context, "map", None)
+    if callable(map_method):
+        try:
+            return dict(map_method())
+        except Exception:
+            pass
+    return {"_raw": serialize_context(context)}
 
 
 def build_bootstrap_code(context: Any) -> str:
