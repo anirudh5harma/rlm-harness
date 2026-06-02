@@ -26,7 +26,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Optional
+from pathlib import Path
+from typing import Any, Optional
 
 from rlm_harness.kernel.events import (
     CompletionEvent,
@@ -84,6 +85,7 @@ class Supervisor:
         config: Optional[SupervisorConfig] = None,
         *,
         between_turns: Optional[Callable[[RunState, int], None]] = None,
+        verifier: Optional[Callable[[Path, RunState], Any]] = None,
     ):
         self.runtime = runtime
         self.traces = traces
@@ -105,6 +107,7 @@ class Supervisor:
             raise ValueError("max_turns must be positive")
         if self.config.max_subcalls_per_turn <= 0:
             raise ValueError("max_subcalls_per_turn must be positive")
+        self._verifier = verifier
         # Cap the runtime's per-turn iteration count so the
         # subcall budget is enforced from below.
         self.runtime.subcall_config = self.runtime.subcall_config.__class__(
@@ -137,31 +140,30 @@ class Supervisor:
                 elif isinstance(event, TurnFinished):
                     last_result = event.result
                     self._record_turn_finished(run_id, turn_index, event)
-                    if last_result.status == "done":
-                        state.phase = RunPhase.DONE
-                        state.final_answer = last_result.final_answer
-                        self._record_completion(run_id, state, last_result)
-                        self._finish_run(run_id, "done")
-                        return state
                     if last_result.status == "error":
                         state.phase = RunPhase.FAILED
                         state.final_answer = last_result.final_answer
                         self._finish_run(run_id, "error")
                         return state
+                    if last_result.status == "done":
+                        # The runtime says `done`, but Phase D
+                        # requires verification before the
+                        # supervisor can call the run `done`.
+                        # We exit the turn loop and run the
+                        # verifier below.
+                        break
             # Per-turn paging hook (Phase A.4). Caller may mutate
             # `state.history` or call out to the memory pager.
             if self.config.between_turns is not None:
                 self.config.between_turns(state, turn_index)
+            if last_result is not None and last_result.status == "done":
+                # We've broken out of the inner loop on `done`; exit
+                # the turn loop and run the verifier.
+                break
 
-        # Out of turns without `done` or `error`. Surface a `stopped`
-        # status; the caller is expected to treat `stopped` as a
-        # partial answer and surface it to the user.
-        state.phase = RunPhase.STOPPED
-        if last_result is not None and not state.final_answer:
-            state.final_answer = last_result.final_answer
-        self._record_completion(run_id, state, last_result)
-        self._finish_run(run_id, "stopped")
-        return state
+        # Out of turns or runtime reported `done`. Run the
+        # verifier hook and respect the strict policy.
+        return self._finalize_with_verification(run_id, state, last_result)
 
     def _build_turn_context(self, state: RunState) -> dict:
         """Build the context the runtime hands to the model.
@@ -237,6 +239,134 @@ class Supervisor:
                 action=_completion_action(state, result),
             )
         )
+
+    def _finalize_with_verification(
+        self,
+        run_id: str,
+        state: RunState,
+        last_result: Optional[RLMResult],
+    ) -> RunState:
+        """Apply the strict verification policy (Phase D).
+
+        The runtime's `done` answer is a *model* claim, not a
+        harness claim. The verifier hook (if any) produces a
+        `VerificationResult`; the policy classifies it; the run's
+        terminal phase is set by the policy. `done` requires
+        `verified` (or `not_applicable` for non-code work).
+        """
+        from rlm_harness.verification import (
+            VerificationPolicy,
+            VerificationStatus,
+        )
+
+        policy = VerificationPolicy()
+        verifier_result = None
+        verifier_raised = False
+        if self._verifier is not None:
+            try:
+                workspace = Path(state.request.workspace)
+                verifier_result = self._verifier(workspace, state)
+                self.traces.event(
+                    run_id,
+                    "verifier_result",
+                    {
+                        "passed": verifier_result.passed,
+                        "changed_files": list(verifier_result.changed_files),
+                        "summary": verifier_result.summary,
+                    },
+                    node="supervisor",
+                )
+            except Exception as exc:  # noqa: BLE001
+                # The verifier itself blew up; that's `unverified`,
+                # not a pass. Surface the error in the trace.
+                self.traces.event(
+                    run_id,
+                    "verifier_error",
+                    {"error": str(exc), "type": type(exc).__name__},
+                    node="supervisor",
+                )
+                verifier_raised = True
+
+        status: VerificationStatus
+        if verifier_raised:
+            # Verifier could not even run. We could not check
+            # what we set out to check; that's `unverified`,
+            # not `not_applicable` and not `verified`.
+            status = VerificationStatus.UNVERIFIED
+        elif verifier_result is None:
+            # No verifier was supplied. The supervisor defaults
+            # to `not_applicable` for non-code work. The CLI
+            # surfaces this; the harness runner surfaces
+            # `unverified` for code work because the verifier
+            # was missing.
+            status = VerificationStatus.NOT_APPLICABLE
+        else:
+            status = policy.classify(verifier_result)
+
+        self.traces.event(
+            run_id,
+            "verification",
+            {
+                "status": status.value,
+                "passed": verifier_result.passed if verifier_result else None,
+                "changed_files": (
+                    list(verifier_result.changed_files) if verifier_result else []
+                ),
+                "summary": verifier_result.summary if verifier_result else "",
+            },
+            node="supervisor",
+        )
+
+        if status == VerificationStatus.FAILED:
+            state.phase = RunPhase.FAILED
+            if last_result is not None and not state.final_answer:
+                state.final_answer = last_result.final_answer
+            self._record_completion(run_id, state, last_result)
+            self._finish_run(run_id, "failed")
+            return state
+
+        if status == VerificationStatus.UNVERIFIED:
+            state.phase = RunPhase.UNVERIFIED
+            if last_result is not None and not state.final_answer:
+                state.final_answer = last_result.final_answer
+            self._record_completion(run_id, state, last_result)
+            self._finish_run(run_id, "unverified")
+            return state
+
+        if status == VerificationStatus.NOT_APPLICABLE:
+            # No code changes; the runtime's `done` is the
+            # final answer. (Code edits with no changed files
+            # would have surfaced earlier; supervisors with a
+            # verifier pass that classification through the
+            # same code path.)
+            if last_result is not None and last_result.status == "done":
+                state.phase = RunPhase.DONE
+                state.final_answer = last_result.final_answer
+                self._record_completion(run_id, state, last_result)
+                self._finish_run(run_id, "done")
+                return state
+            # Out of turns without a final answer: the run is
+            # stopped. Treat as a partial answer.
+            state.phase = RunPhase.STOPPED
+            if last_result is not None and not state.final_answer:
+                state.final_answer = last_result.final_answer
+            self._record_completion(run_id, state, last_result)
+            self._finish_run(run_id, "stopped")
+            return state
+
+        # status == VERIFIED
+        if last_result is None or last_result.status != "done":
+            # Should not happen — we only reach `verified` when
+            # the verifier ran AND the runtime said `done`.
+            # Defensive: surface a `failed` and stop.
+            state.phase = RunPhase.FAILED
+            self._finish_run(run_id, "failed")
+            return state
+        state.phase = RunPhase.DONE
+        state.final_answer = last_result.final_answer
+        self._record_completion(run_id, state, last_result)
+        self._finish_run(run_id, "done")
+        return state
 
     def _finish_run(self, run_id: str, status: str) -> None:
         self.traces.finish_run(run_id, status)
