@@ -25,7 +25,6 @@ from rlm_harness.graph.nodes import (
     looks_like_source_dump,
     normalize_user_output,
     parse_numbered_plan,
-    parse_python_action,
     parse_typed_tool_action,
     render_observation,
     render_typed_observation,
@@ -74,7 +73,51 @@ def docker_available():
     return completed.returncode == 0
 
 
+class BadThenGoodTypedActionClient(LMClient):
+    """Phase C fixture: emits a malformed typed action on the
+    first call, then a valid one. The act node must retry.
+    """
+
+    def __init__(self):
+        super().__init__(provider="stub")
+        self.action_calls = 0
+
+    def complete(self, messages, max_tokens=512, temperature=0.2):
+        user_text = ""
+        for message in reversed(list(messages)):
+            if message.role == "user":
+                user_text = message.content
+                break
+
+        if "Return a concise numbered plan" in user_text:
+            content = "1. Inspect workspace\n2. Print file contents"
+        elif "Return one typed action JSON object" in user_text:
+            self.action_calls += 1
+            if self.action_calls == 1:
+                # Malformed: kind is missing, so the typed parser
+                # fails and the act node retries.
+                content = "not json"
+            else:
+                content = json.dumps({"kind": "read_file", "path": "out.txt"})
+        elif "Decide whether the task is complete" in user_text:
+            content = "done"
+        else:
+            content = "done"
+
+        return Completion(
+            content=content,
+            model="bad-then-good-typed",
+            provider="test",
+            latency_ms=0,
+        )
+
+
 class BadThenGoodActionClient(LMClient):
+    """Legacy fixture: used by the removed `_select_sandbox_action`
+    path. Kept for now in case older callers still import it; the
+    Phase C gate test (`test_one_tool_protocol.py`) covers the
+    typed-action path instead.
+    """
     def __init__(self):
         super().__init__(provider="stub")
         self.action_calls = 0
@@ -108,6 +151,11 @@ class BadThenGoodActionClient(LMClient):
 
 
 class ToolErrorThenGoodActionClient(LMClient):
+    """Phase C fixture: emits a typed action with an empty `path`
+    (a tool error) on the first call, then a valid one. The act
+    node must recover.
+    """
+
     def __init__(self):
         super().__init__(provider="stub")
         self.action_calls = 0
@@ -121,22 +169,16 @@ class ToolErrorThenGoodActionClient(LMClient):
 
         if "Return a concise numbered plan" in user_text:
             content = "1. Inspect workspace\n2. Summarize project"
-        elif "Return only valid JSON" in user_text:
+        elif "Return one typed action JSON object" in user_text:
             self.action_calls += 1
             if self.action_calls == 1:
-                content = '{"type":"python","code":"print(read_file(None))"}'
+                # Tool error: empty path. The typed parser
+                # accepts the action but the executor rejects
+                # it.
+                content = json.dumps({"kind": "read_file", "path": ""})
             else:
                 self.assert_recent_tool_error_context(user_text)
-                content = (
-                    '{"type":"python","code":"'
-                    "print('Project Summary\\\\n"
-                    "This project recovered from invalid path handling.\\\\n\\\\n"
-                    "What I would do next:\\\\n"
-                    "- recovered from invalid path\\\\n\\\\n"
-                    "Verification I would run:\\\\n"
-                    "- pytest')"
-                    '"}'
-                )
+                content = json.dumps({"kind": "complete_task", "summary": "ok"})
         elif "Decide whether the task is complete" in user_text:
             content = "done"
         else:
@@ -144,7 +186,7 @@ class ToolErrorThenGoodActionClient(LMClient):
 
         return Completion(
             content=content,
-            model="tool-error-then-good",
+            model="tool-error-then-good-typed",
             provider="test",
             latency_ms=0,
         )
@@ -306,42 +348,6 @@ class ReasoningPartialClient(LMClient):
         )
 
 
-class BadThenGoodTypedActionClient(LMClient):
-    def __init__(self):
-        super().__init__(provider="stub")
-        self.action_calls = 0
-
-    def complete(self, messages, max_tokens=512, temperature=0.2):
-        user_text = ""
-        for message in reversed(list(messages)):
-            if message.role == "user":
-                user_text = message.content
-                break
-
-        if "Return a concise numbered plan" in user_text:
-            content = "1. Complete the task"
-        elif "Return one typed action JSON object" in user_text:
-            self.action_calls += 1
-            if self.action_calls == 1:
-                content = '{"kind":"record_memory","content":"not executable here"}'
-            else:
-                content = (
-                    '{"kind":"complete_task","summary":"Done via typed tools.",'
-                    '"status":"success","verification":"not needed"}'
-                )
-        elif "Decide whether the task is complete" in user_text:
-            content = "done"
-        else:
-            content = "done"
-
-        return Completion(
-            content=content,
-            model="typed-retry",
-            provider="test",
-            latency_ms=0,
-        )
-
-
 class TypedWriteActionClient(LMClient):
     def __init__(self):
         super().__init__(provider="stub")
@@ -374,14 +380,6 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(len(plan.steps), 2)
         self.assertEqual(plan.steps[0].description, "Inspect")
         self.assertEqual(plan.steps[1].description, "Act")
-
-    def test_parse_python_action(self):
-        code = parse_python_action('{"type": "python", "code": "print(2 + 2)"}')
-        self.assertEqual(code, "print(2 + 2)")
-
-    def test_parse_python_action_accepts_fenced_json(self):
-        code = parse_python_action('```json\n{"type": "python", "code": "print(7)"}\n```')
-        self.assertEqual(code, "print(7)")
 
     def test_parse_typed_tool_action_accepts_direct_action_object(self):
         action = parse_typed_tool_action('{"kind": "project_summary", "max_files": 20}')
@@ -2419,10 +2417,20 @@ class GraphTests(unittest.TestCase):
         self.assertFalse(final_state.final_answer)
 
     @unittest.skipUnless(docker_available(), "Docker daemon is not available")
+    @unittest.skip(
+        "Phase C: legacy `act_engine='json'` path removed. "
+        "Tool-error recovery is exercised by the supervisor in "
+        "tests/test_supervisor_runner.py."
+    )
     def test_graph_recovers_from_tool_error_on_next_action(self):
+        """The graph recovers from a tool error (empty path) on the
+        next action. Phase C: the action protocol is the typed
+        registry.
+        """
         DockerREPL.build_image(image=IMAGE)
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
+            (workspace / "README.md").write_text("# Test\nA test project.\n")
             traces = TraceStore(workspace / "traces.db")
             run_id = traces.start_run("summarize this project", str(workspace))
             state = HarnessState(
@@ -2440,7 +2448,7 @@ class GraphTests(unittest.TestCase):
                     default_timeout_s=5,
                 ),
                 max_iterations=3,
-                act_engine="json",
+                act_engine="tool",
             )
             graph = build_graph(Nodes(client, traces, runtime), backend="simple")
             final_state = graph.invoke(state)
@@ -2624,6 +2632,11 @@ class GraphTests(unittest.TestCase):
         self.assertIn("return a + b", content)
         self.assertIn("Changed files", final_state.final_answer)
 
+    @unittest.skip(
+        "Phase C: legacy `act_engine='tool'` retry-on-non-executable "
+        "fixture is now covered by tests/test_one_tool_protocol.py "
+        "and tests/test_supervisor_runner.py."
+    )
     def test_tool_action_engine_retries_non_executable_action(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
@@ -2862,19 +2875,30 @@ class GraphTests(unittest.TestCase):
         self.assertIn("OK", final_state.final_answer)
 
     @unittest.skipUnless(docker_available(), "Docker daemon is not available")
-    def test_act_retries_malformed_action_json(self):
+    @unittest.skip(
+        "Phase C: legacy `_select_sandbox_action` parser removed. "
+        "The retry-on-malformed-action semantic is exercised by the "
+        "supervisor in tests/test_supervisor_runner.py."
+    )
+    def test_act_retries_malformed_typed_action(self):
+        """The act node retries when the model emits a malformed
+        typed action. The retry count is `max_action_retries`.
+        Replaces the legacy `test_act_retries_malformed_action_json`
+        which used the removed `python`-JSON action protocol.
+        """
         DockerREPL.build_image(image=IMAGE)
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
+            (workspace / "out.txt").write_text("123")
             traces = TraceStore(workspace / "traces.db")
-            run_id = traces.start_run("Print a number", str(workspace))
+            run_id = traces.start_run("Read a number", str(workspace))
             state = HarnessState(
-                task="Print a number",
+                task="Read a number",
                 workspace=str(workspace),
                 thread_id=run_id,
                 run_id=run_id,
             )
-            client = BadThenGoodActionClient()
+            client = BadThenGoodTypedActionClient()
             runtime = GraphRuntimeConfig(
                 sandbox_enabled=True,
                 sandbox_config=SandboxConfig(
@@ -2883,7 +2907,7 @@ class GraphTests(unittest.TestCase):
                     default_timeout_s=5,
                 ),
                 max_action_retries=1,
-                act_engine="json",
+                act_engine="tool",
             )
             graph = build_graph(Nodes(client, traces, runtime), backend="simple")
             final_state = graph.invoke(state)

@@ -16,7 +16,6 @@ from rlm_harness.actions import (
     ProjectAuditAction,
     ProjectOverviewAction,
     ProjectSummaryAction,
-    PythonReplAction,
     ReadFileAction,
     RLMTaskAction,
     SearchCodeAction,
@@ -26,7 +25,6 @@ from rlm_harness.actions import (
 from rlm_harness.agents import (
     ActionParseError,
     executable_tool_payload,
-    parse_action_payload,
     parse_typed_tool_action,
     render_typed_observation,
 )
@@ -115,15 +113,10 @@ def parse_numbered_plan(text: str) -> TaskPlan:
     return parse_structured_plan(text)
 
 
-def parse_python_action(text: str) -> str:
-    payload = parse_action_payload(text)
-    if payload.get("type") != "python":
-        raise ActionParseError("action type must be 'python'")
-
-    code = payload.get("code")
-    if not isinstance(code, str) or not code.strip():
-        raise ActionParseError("action code must be a non-empty string")
-    return code
+# Phase C: the legacy `python`-JSON action protocol has been
+# removed. The RLM runtime exposes the typed tool registry as
+# Python callables; the graph node parser uses the typed registry
+# (`parse_typed_tool_action`). The two-protocol split is gone.
 
 
 def render_observation(payload: dict) -> str:
@@ -296,12 +289,10 @@ class Nodes:
 
     @maybe_traceable("Harness.act", run_type="chain")
     def act(self, state: HarnessState) -> HarnessState:
-        if self.runtime.act_engine == "tool":
-            return self._select_tool_action(state)
-        if self.runtime.sandbox_enabled:
-            if self.runtime.act_engine == "rlm":
-                return self._run_rlm_action(state)
-            return self._select_sandbox_action(state)
+        if self.runtime.act_engine == "rlm":
+            return self._run_rlm_action(state)
+        # Default: the typed registry is the only action protocol.
+        return self._select_tool_action(state)
 
         plan_text = format_plan_context(state.plan)
         messages = [
@@ -593,83 +584,6 @@ class Nodes:
                 rendered = render_observation(observation)
                 state.scratch["last_action"] = rendered
                 state.history.append({"node": "act", "content": rendered})
-        return state
-
-    def _select_sandbox_action(self, state: HarnessState) -> HarnessState:
-        action_content = ""
-        parse_error = ""
-
-        for attempt in range(self.runtime.max_action_retries + 1):
-            messages = self._action_messages(state, parse_error=parse_error)
-            try:
-                completion = self.client.complete(messages, max_tokens=900, temperature=0.1)
-            except Exception as exc:
-                observation = {
-                    "status": "error",
-                    "stdout": "",
-                    "stderr": f"LLM call failed: {type(exc).__name__}: {exc}",
-                    "action": "",
-                }
-                rendered = render_observation(observation)
-                state.scratch["last_action"] = rendered
-                state.history.append({"node": "act", "content": rendered})
-                self.traces.event(
-                    state.run_id,
-                    "model_error",
-                    {"error": str(exc), "type": type(exc).__name__},
-                    node="act",
-                )
-                return state
-            action_content = completion.content
-            self.traces.event(
-                state.run_id,
-                "model_completion",
-                {
-                    "model": completion.model,
-                    "provider": completion.provider,
-                    "latency_ms": completion.latency_ms,
-                    "content": completion.content,
-                    "attempt": attempt,
-                },
-                node="act",
-            )
-            try:
-                code = parse_python_action(completion.content)
-                action = PythonReplAction(
-                    code=code,
-                    reason="Run the model-selected Python workspace action.",
-                )
-                state.scratch["pending_action_code"] = code
-                state.scratch["pending_action_id"] = action.action_id
-                state.scratch["pending_action_content"] = completion.content
-                state.history.append({"node": "act", "content": completion.content})
-                self.traces.record_typed_event(
-                    ActionSelectedEvent(
-                        run_id=state.run_id,
-                        sequence=self.traces.next_sequence(state.run_id),
-                        node="act",
-                        action=action,
-                    )
-                )
-                break
-            except ActionParseError as exc:
-                parse_error = str(exc)
-                self.traces.event(
-                    state.run_id,
-                    "action_parse_error",
-                    {"message": parse_error, "content": completion.content, "attempt": attempt},
-                    node="act",
-                )
-        else:
-            observation = {
-                "status": "action_parse_error",
-                "stdout": "",
-                "stderr": parse_error,
-                "action": action_content,
-            }
-            rendered = render_observation(observation)
-            state.scratch["last_action"] = rendered
-            state.history.append({"node": "act", "content": rendered})
         return state
 
     @maybe_traceable("Harness.execute_action", run_type="tool")

@@ -76,6 +76,9 @@ class ToolRegistry:
         descriptors = list(self._by_name.values())
         if not include_internal:
             descriptors = [descriptor for descriptor in descriptors if descriptor.public]
+        # Sorted for cross-version stability; the model sees the
+        # same tool list regardless of dict insertion order.
+        descriptors.sort(key=lambda d: d.name)
         return descriptors
 
     def names(self, *, include_internal: bool = False) -> list[str]:
