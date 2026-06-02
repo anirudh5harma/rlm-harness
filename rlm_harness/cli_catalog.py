@@ -3,32 +3,44 @@ from __future__ import annotations
 import os
 from typing import TextIO
 
+# Phase F: trimmed to 12 user-facing top-level commands. The
+# rest are still registered as subcommands for backward
+# compatibility; they are reachable via `harness status ...`,
+# `harness eval ...`, etc., and as hidden top-level aliases.
 PUBLIC_COMMANDS = {
     "ask",
-    "commands",
-    "continue",
-    "tools",
-    "palette",
-    "plan",
-    "run",
     "work",
+    "continue",
     "resume",
-    "status",
     "trace",
+    "status",
     "doctor",
-    "dogfood",
-    "evolve",
-    "feedback",
-    "init",
-    "model",
-    "mcp",
-    "provider",
-    "profile",
-    "readiness",
-    "taste",
-    "config",
     "eval",
+    "init",
+    "install",
     "update",
+    "commands",
+}
+
+# Backward-compat aliases: still registered as top-level
+# subcommands so existing scripts keep working, but no longer
+# advertised in `--help`. The aliases route to the canonical
+# subcommand.
+LEGACY_COMMANDS = {
+    "run",  # alias for `work`
+    "plan",  # alias for `work` with read-only autonomy
+    "tools",  # alias for `status tools`
+    "mcp",  # alias for `status mcp`
+    "palette",  # alias for `status palette`
+    "dogfood",  # alias for `eval dogfood`
+    "evolve",  # alias for `status evolve`
+    "feedback",  # alias for `status feedback`
+    "taste",  # alias for `status taste`
+    "profile",  # alias for `status profile` (legacy)
+    "model",  # alias for `init model`
+    "provider",  # alias for `init provider`
+    "readiness",  # alias for `doctor`
+    "config",  # alias for `status config`
 }
 INTERNAL_COMMANDS = {
     "langgraph-plan",
@@ -38,7 +50,7 @@ INTERNAL_COMMANDS = {
     "mem",
     "sandbox",
 }
-ALL_COMMANDS = PUBLIC_COMMANDS | INTERNAL_COMMANDS
+ALL_COMMANDS = PUBLIC_COMMANDS | LEGACY_COMMANDS | INTERNAL_COMMANDS
 DEFAULT_PROG = "harness"
 SLASH_HIDDEN_COMMANDS = {"tools"}
 

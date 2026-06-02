@@ -127,6 +127,18 @@ def default_memory_path() -> Path:
     return Path(os.environ.get("RLM_HARNESS_MEMORY_DB", ".rlm_harness/memory.db"))
 
 
+def default_extension_root() -> Path:
+    """Where installed extensions live. Mirrors the pi-mono
+    `~/.pi/agent/` layout: project-local first, then user-global.
+    """
+    return Path(
+        os.environ.get(
+            "RLM_HARNESS_EXTENSION_ROOT",
+            str(Path.home() / ".harness" / "extensions"),
+        )
+    )
+
+
 def default_profile_path() -> Path:
     return Path(os.environ.get("RLM_HARNESS_PROFILE_DB", CONFIG_DIR / "profile.db"))
 

@@ -5,8 +5,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from rlm_harness import __version__
-from rlm_harness.cli_catalog import DEFAULT_PROG, PUBLIC_COMMANDS
+from rlm_harness.cli_catalog import DEFAULT_PROG, LEGACY_COMMANDS, PUBLIC_COMMANDS
 from rlm_harness.config import default_base_url, default_model, default_provider
+from rlm_harness.extension_cli import add_install_command
 from rlm_harness.learning_cli import add_learning_commands
 from rlm_harness.maintenance_cli import add_maintenance_commands
 from rlm_harness.mcp_cli import add_mcp_command
@@ -74,9 +75,7 @@ def build_parser(callbacks: RootCommandCallbacks) -> argparse.ArgumentParser:
     subparsers = root.add_subparsers(
         dest="command",
         metavar=(
-            "{ask,commands,continue,tools,mcp,palette,plan,run,work,resume,trace,doctor,"
-            "dogfood,evolve,feedback,init,model,provider,profile,taste,status,readiness,"
-            "config,eval,update}"
+            "{ask,work,continue,resume,trace,status,doctor,eval,init,install,update,commands}"
         ),
         required=True,
     )
@@ -94,6 +93,7 @@ def build_parser(callbacks: RootCommandCallbacks) -> argparse.ArgumentParser:
         cmd_continue=callbacks.cmd_continue,
     )
     add_trace_command(subparsers)
+    add_install_command(subparsers)
     add_onboarding_commands(subparsers)
     add_provider_commands(subparsers)
     add_taste_command(subparsers, "profile", "Inspect or teach Harness taste.")
@@ -108,6 +108,6 @@ def build_parser(callbacks: RootCommandCallbacks) -> argparse.ArgumentParser:
     subparsers._choices_actions = [  # type: ignore[attr-defined]
         action
         for action in subparsers._choices_actions  # type: ignore[attr-defined]
-        if action.dest in PUBLIC_COMMANDS
+        if action.dest in (set(PUBLIC_COMMANDS) | set(LEGACY_COMMANDS))
     ]
     return root

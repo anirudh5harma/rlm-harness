@@ -50,6 +50,24 @@ class TraceStore:
                 CREATE INDEX IF NOT EXISTS events_parent ON events(parent_id);
                 """
             )
+            # Phase E: add the `parent_id` column to an existing
+            # `events` table that was created before Phase E. The
+            # `CREATE TABLE IF NOT EXISTS` above is a no-op when
+            # the table already exists, so the new column has to
+            # be added via ALTER. SQLite's `ALTER TABLE ADD
+            # COLUMN` is idempotent only via the duplicate-column
+            # check we do here.
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(events)").fetchall()
+            }
+            if "parent_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE events ADD COLUMN parent_id INTEGER"
+                )
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS events_parent ON events(parent_id)"
+                )
 
     def start_run(self, task: str, workspace: str, thread_id: Optional[str] = None) -> str:
         run_id = str(uuid.uuid4())
