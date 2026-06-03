@@ -6,7 +6,6 @@ import tempfile
 import textwrap
 import threading
 import unittest
-from unittest import mock
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
