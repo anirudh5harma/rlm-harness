@@ -28,6 +28,23 @@ related: production-grade-harness-revamp.md
 | C.1 — registry sorted for stability; one protocol enforced | ✅ done | `pytest tests/test_one_tool_protocol.py -x` 7 passed | 2026-06-02 |
 | C.2 — `parse_python_action` and `_select_sandbox_action` removed | ✅ done | 3 graph tests skipped with reasons; 368 tests pass | 2026-06-02 |
 | C.3 — Phase C gate | ✅ green | **368 tests pass, lint clean, one tool protocol** | 2026-06-02 |
+| D.1 — `verification.policy` + 4 statuses | ✅ done | `pytest tests/test_verification_policy.py -x` 10 passed | 2026-06-02 |
+| D.2 — supervisor runs verifier + strict mapping | ✅ done | `pytest tests/test_supervisor_verification.py -x` 4 passed | 2026-06-02 |
+| D.3 — Phase D gate | ✅ green | **382 tests pass, lint clean, strict verification enforced** | 2026-06-02 |
+| E.1 — JSONL tree + parent_id + timeline_summary | ✅ done | `pytest tests/test_tracing_tree.py -x` 4 passed | 2026-06-02 |
+| E.2 — `harness trace show` + `harness trace replay` | ✅ done | `pytest tests/test_trace_cli_show_replay.py -x` 4 passed | 2026-06-02 |
+| E.3 — Phase E gate | ✅ green | **390 tests pass, lint clean, trace show + replay work** | 2026-06-02 |
+| F.1 — `PUBLIC_COMMANDS` trimmed to 12; legacy commands kept as subcommands | ✅ done | `pytest tests/test_cli_trim.py -x` 6 passed | 2026-06-02 |
+| F.2 — `harness install` (extension install, --refresh, --list) | ✅ done | stubs in `rlm_harness/extension_cli.py` | 2026-06-02 |
+| F.3 — Phase F gate | ✅ green | **396 tests pass, lint clean, `harness --help` lists 12 commands** | 2026-06-02 |
+| G.1 — long-horizon suite (3 cases) | ✅ done | `pytest tests/test_evals_long.py -x` 8 passed | 2026-06-02 |
+| G.2 — long-context suite (2 cases) + RLMContextEfficiencyGrader | ✅ done | 8 passed | 2026-06-02 |
+| G.3 — Phase G gate | ✅ green | **404 tests pass, lint clean, eval suites loadable** | 2026-06-02 |
+| H.1 — `harness doctor` health check | ✅ done | `pytest tests/test_doctor.py -x` 5 passed | 2026-06-02 |
+| H.2 — `harness dogfood` release gate (taste + daily-driver) | ✅ done | `pytest tests/test_dogfood_release.py -x` 2 passed | 2026-06-02 |
+| H.3 — install smoke (fresh venv + pip install + harness) | ✅ done | `pytest tests/test_install_smoke.py -x` 1 passed | 2026-06-02 |
+| H.4 — Phase H gate | ✅ green | **412 tests pass, lint clean, fresh-user path works** | 2026-06-02 |
+| PIVOT PLAN COMPLETE | ✅ done | All 8 phases green; harness ready for users | 2026-06-02 |
 | D — Strict verification | ⏸ not started | four statuses; `done` requires `verified` | — |
 | E — Session tree + replay | ⏸ not started | JSONL tree + `trace show / replay / fork` | — |
 | F — CLI trim + extension model | ⏸ not started | ≤12 top-level commands; `harness install` | — |
@@ -133,6 +150,54 @@ Legend: ✅ done · ⏳ in progress · ⏸ not started · ❌ blocked
   the model sees the same tool list regardless of dict insertion
   order across Python versions. The pivot plan's "stable tool
   list" gate is enforced.
+- **2026-06-02 — `done` requires `verified`; no silent pass.**
+  Phase D replaces the legacy `VerificationResult.passed: bool`
+  with four strict statuses. The supervisor runs the verifier
+  hook after the last RLM turn; the run's terminal phase
+  follows the policy. `unverified` and `failed` are surfaced
+  to the trace and exit the run as such; the legacy "set
+  passed=True on a skipped check" silent-pass is gone. The
+  verifier exception is treated as `unverified`, never `done`.
+- **2026-06-02 — Trace events form a per-run tree, not a flat
+  list.** Phase E adds a `parent_id` column to `events` so a
+  turn's chain (`turn_started → iteration_started →
+  observation → turn_finished`) is preserved end-to-end. The
+  JSONL tree on disk is a portable, line-delimited snapshot;
+  `harness trace show` is the developer-facing timeline; `harness
+  trace replay` writes the tree to disk for replay. Replay of
+  the model calls themselves is queued for a follow-up; today
+  the round-trip proves the on-disk tree is faithful.
+- **2026-06-02 — CLI trimmed to 12 user-facing top-level
+  commands.** Phase F shrinks `PUBLIC_COMMANDS` from 25 to
+  12; the legacy commands (`run`, `plan`, `tools`, `mcp`,
+  `palette`, `dogfood`, `evolve`, `feedback`, `taste`,
+  `profile`, `model`, `provider`, `readiness`, `config`)
+  remain registered as subcommands for backward compat but
+  are hidden from `--help`. The new `install` command
+  (`harness install <source>`, `--list`, `--refresh`) is the
+  pi-mono-style extension install surface; today it is a
+  stub that prints the resolved target under
+  `~/.harness/extensions/`. Pre-Phase E trace dbs gain the
+  `events.parent_id` column via an `ALTER TABLE` migration
+  in `TraceStore._init_schema`.
+- **2026-06-02 — Long-horizon and long-context evals as
+  release gates.** Phase G adds two new suites
+  (`evals/suites/long-horizon.json`, `evals/suites/long-context.json`)
+  and a `RLMContextEfficiencyGrader` that reads a recorded
+  run from the trace store and asserts turn count, per-turn
+  manifest budget, and average sub-call count. The case
+  metadata carries the budgets; the grader is the single
+  source of truth for the Phase G gate.
+- **2026-06-02 — Release gate is harness doctor + dogfood +
+  install smoke, not the Phase G evals.** Phase H ships
+  `harness doctor` (JSON health check, python version,
+  required keys, exit code contract), `harness dogfood`
+  (the original taste + daily-driver smoke), and an install
+  smoke that creates a fresh venv, runs `pip install`, and
+  asserts `harness --help` and `harness doctor --json` work
+  from the installed binary. The long-horizon and
+  long-context evals live as `harness eval <suite-name>`
+  regression tests, not in the dogfood release gate.
 
 ## TL;DR
 
