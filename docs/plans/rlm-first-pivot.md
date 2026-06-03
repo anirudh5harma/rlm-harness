@@ -45,6 +45,8 @@ related: production-grade-harness-revamp.md
 | H.3 — install smoke (fresh venv + pip install + harness) | ✅ done | `pytest tests/test_install_smoke.py -x` 1 passed | 2026-06-02 |
 | H.4 — Phase H gate | ✅ green | **412 tests pass, lint clean, fresh-user path works** | 2026-06-02 |
 | PIVOT PLAN COMPLETE | ✅ done | All 8 phases green; harness ready for users | 2026-06-02 |
+| I.1 — default backend = supervisor | ✅ done | `pytest tests/test_default_supervisor_backend.py -x` 4 passed; 418 tests pass | 2026-06-03 |
+| I.2 — local RLM REPL exposes workspace tools | ✅ done | `sandbox.tools.set_workspace` + `_local_workspace_tool_bindings` injected into `LocalRLMRepl`; 4 new tests in `tests/test_default_supervisor_backend.py` | 2026-06-03 |
 | D — Strict verification | ⏸ not started | four statuses; `done` requires `verified` | — |
 | E — Session tree + replay | ⏸ not started | JSONL tree + `trace show / replay / fork` | — |
 | F — CLI trim + extension model | ⏸ not started | ≤12 top-level commands; `harness install` | — |
@@ -102,6 +104,42 @@ Legend: ✅ done · ⏳ in progress · ⏸ not started · ❌ blocked
   surface is trimmed. End-to-end smoke test in the Phase A gate
   produces a 5+ event trace for a 1-turn run, satisfying the
   per-turn shape.
+- **2026-06-03 — Default backend flipped to `supervisor`; `auto`
+  is an alias for `supervisor`.** A user reported that a
+  default `harness ask <question>` invocation produced a
+  canned `Project Summary` answer and exited with status 1
+  on a substantive question. The default was still
+  `--graph-backend auto`, which routed to the legacy
+  LangGraph/simple graph and the model's canned text answer.
+  The supervisor is the right control plane for substantive
+  questions because it forces the model to write Python in
+  `repl` blocks and engage with the workspace tools. The
+  CLI now defaults to `supervisor`; `auto` is preserved as
+  an alias so older pinned scripts and tests that pass
+  `--graph-backend auto` explicitly keep the new path.
+  4 new tests in `tests/test_default_supervisor_backend.py`
+  pin the default, the alias, the substantive-answer
+  contract, and the "exactly one `runs` row per invocation"
+  guarantee (a regression of the previous bug where
+  `run_task` and `run_supervisor_graph` each called
+  `traces.start_run`).
+- **2026-06-03 — Local RLM REPL exposes the workspace tool
+  surface.** The supervisor's RLM runtime has two paths:
+  the sandbox (Docker, with `sandbox/worker.py`'s namespace)
+  and the local fallback (`LocalRLMRepl`). The local
+  fallback only had `llm_query`, `rlm_query`, and
+  `complete_task`; a repl block that referenced
+  `project_summary()` raised `NameError` and the run exited
+  with status 1. We now inject
+  `sandbox.tools.{read_file, project_summary, ...}` into
+  the local REPL namespace (via
+  `_local_workspace_tool_bindings`) and add
+  `sandbox.tools.set_workspace` so the tools resolve
+  relative paths against the runtime's workspace, not the
+  sandbox's hard-coded `/workspace`. The supervisor's
+  autonomy mode continues to gate writes; the tool binding
+  only matches the sandbox surface that real provider
+  models expect.
 - **2026-06-02 — `Supervisor.run()` exits on `done` or `error`
   immediately; `stopped` only at `max_turns`.** A turn that emits a
   final answer ends the run. A turn that runs out of iterations
@@ -188,6 +226,12 @@ Legend: ✅ done · ⏳ in progress · ⏸ not started · ❌ blocked
   manifest budget, and average sub-call count. The case
   metadata carries the budgets; the grader is the single
   source of truth for the Phase G gate.
+- **2026-06-03 — Phase I (post-completion regression
+  follow-up).** Phase I is not a planned phase; it is a
+  catch-up row for a regression the user surfaced after
+  Phase H shipped. The pivot plan remains complete at
+  Phase H; Phase I is just the fix. No new phase letter
+  is reserved for follow-ups.
 - **2026-06-02 — Release gate is harness doctor + dogfood +
   install smoke, not the Phase G evals.** Phase H ships
   `harness doctor` (JSON health check, python version,
@@ -198,6 +242,23 @@ Legend: ✅ done · ⏳ in progress · ⏸ not started · ❌ blocked
   from the installed binary. The long-horizon and
   long-context evals live as `harness eval <suite-name>`
   regression tests, not in the dogfood release gate.
+
+## Breaking changes
+
+- **2026-06-03 — `--graph-backend` default flipped to
+  `supervisor`.** The default is no longer `auto`. The
+  `auto` value is preserved as an alias for `supervisor`,
+  so older pinned scripts that pass
+  `--graph-backend auto` explicitly still route to the
+  new control plane. The legacy `simple` and `langgraph`
+  backends remain opt-in for users who need the
+  pre-Phase A behaviour. Migration: remove explicit
+  `--graph-backend auto` from any pinned script — the
+  new default is the supervisor path; or pin
+  `--graph-backend simple` / `--graph-backend langgraph`
+  to keep the legacy behaviour. There is no on-disk data
+  migration: the `runs` and `events` tables are unchanged
+  and old trace dbs read the same after the upgrade.
 
 ## TL;DR
 

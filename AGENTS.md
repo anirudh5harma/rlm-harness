@@ -255,6 +255,13 @@ pytest tests/test_evals.py -x
 bash scripts/install.sh     # clean install
 harness doctor              # all green
 harness dogfood             # all green
+
+# Phase I — Default backend = supervisor (regression follow-up)
+pytest tests/test_default_supervisor_backend.py -x
+# A default `harness ask <question>` invocation must route through
+# the supervisor (the new control plane) and exit with status=done.
+# `--graph-backend auto` is an alias for `supervisor`; `simple` /
+# `langgraph` remain opt-in for users who need the legacy paths.
 ```
 
 ---

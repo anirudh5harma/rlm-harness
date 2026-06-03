@@ -264,7 +264,10 @@ class TraceStoreTests(unittest.TestCase):
         self.assertEqual(report_exit, 0)
         self.assertTrue(output.startswith("{\n"))
         self.assertEqual(payload["status"], "done")
-        self.assertIn("Stub response", payload["response"])
+        # The supervisor's RLM runtime calls the stub model, which
+        # emits a repl block whose answer becomes the run's final
+        # answer. The stub fallback prints a recognisable prefix.
+        self.assertIn("Stub RLM completed task", payload["response"])
         self.assertEqual(report["run_id"], payload["run_id"])
 
     def test_cli_run_text_output_is_only_response(self):
@@ -289,7 +292,7 @@ class TraceStoreTests(unittest.TestCase):
             output = stdout.getvalue()
 
         self.assertEqual(exit_code, 0)
-        self.assertIn("Stub response", output)
+        self.assertIn("Stub RLM completed task", output)
         self.assertNotIn("Trace report", output)
         self.assertNotIn("run_started", output)
 
@@ -324,14 +327,14 @@ class TraceStoreTests(unittest.TestCase):
 
         progress = stderr.getvalue()
         self.assertEqual(exit_code, 0)
-        self.assertIn("Stub response", stdout.getvalue())
+        self.assertIn("Stub RLM completed task", stdout.getvalue())
         self.assertIn("\r", progress)
         self.assertEqual(progress.count("\n"), 0)
         self.assertIn("harness run", progress)
         self.assertIn("setup: memory disabled", progress)
         self.assertNotIn("[command]", progress)
         self.assertNotIn("[setup]", progress)
-        self.assertNotIn("Stub response", progress)
+        self.assertNotIn("Stub RLM completed task", progress)
 
     def test_cli_run_json_suppresses_progress_markers(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -399,7 +402,7 @@ class TraceStoreTests(unittest.TestCase):
                 )
 
         self.assertEqual(exit_code, 0)
-        self.assertIn("Stub response", stdout.getvalue())
+        self.assertIn("Stub RLM completed task", stdout.getvalue())
         self.assertEqual(stderr.getvalue(), "")
 
     def test_run_console_uses_light_cyan_for_status(self):

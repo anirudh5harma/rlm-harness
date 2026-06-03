@@ -323,12 +323,17 @@ def run_task(
             )
             runtime = build_runtime(args, workspace, memory, profile_memory, task)
             console.marker("graph", "preparing runtime")
-            if args.graph_backend == "supervisor":
+            if args.graph_backend in ("supervisor", "auto"):
                 # The supervisor is the new control plane (Phase A).
                 # It runs the RLM runtime per turn, pages memory
                 # between turns, and emits typed events to the
                 # trace. Returns a `HarnessState` for the rest of
-                # the CLI.
+                # the CLI. `auto` is the legacy default value and is
+                # treated as an alias for `supervisor` so older
+                # configs and pinned scripts keep the new path.
+                # The supervisor receives the `run_id` this
+                # function already created so the trace has
+                # exactly one `runs` row per invocation.
                 console.marker("supervisor", "running RLM turns")
                 final_state = run_supervisor_graph(
                     args,
@@ -339,7 +344,11 @@ def run_task(
                     traces,
                     memory,
                     profile_memory,
+                    run_id=run_id,
                 )
+                # The supervisor's `_finish_run` is the canonical
+                # closer; it has the verification-aware status.
+                # Skip the legacy `traces.finish_run` below.
             else:
                 graph = build_graph(
                     Nodes(build_client(args), traces, runtime),
@@ -354,7 +363,7 @@ def run_task(
                     console.marker("agent", "working through the request")
                     final_state = graph.invoke(state)
                 close_graph(graph)
-        traces.finish_run(run_id, final_state.status)
+                traces.finish_run(run_id, final_state.status)
     except (LMClientError, MemoryError, SandboxError) as exc:
         console.error(str(exc))
         traces.event(run_id, "error", {"message": str(exc)}, node="cli")
@@ -744,15 +753,26 @@ def run_supervisor_graph(
     traces: TraceStore,
     memory: Optional[Memory],
     profile_memory: Optional[Memory],
+    run_id: Optional[str] = None,
 ) -> HarnessState:
     """Run the supervisor as the control plane.
 
     Returns a `HarnessState` whose `status` is the harness status
-    string. Emits the same `RunStartedEvent` and `CompletionEvent`
-    the legacy graph runner emits, so the trace and the CLI output
-    match the existing contract.
+    string. The caller owns the run lifecycle: it should pass the
+    `run_id` it created with `traces.start_run(...)` so the trace has
+    exactly one `runs` row per invocation. The supervisor's
+    `_finish_run` is the canonical closer with the
+    verification-aware status.
+
+    If the caller does not provide a `run_id` (e.g. an internal
+    test that drives the supervisor directly), the supervisor will
+    create one. Production callers must pass it.
     """
-    run_id = traces.start_run(task, str(workspace), thread_id=thread_id)
+    if run_id is None:
+        run_id = traces.start_run(task, str(workspace), thread_id=thread_id)
+        owned_run = True
+    else:
+        owned_run = False
     sandbox_config = SandboxConfig(
         image=args.sandbox_image,
         workspace=workspace,
@@ -782,7 +802,6 @@ def run_supervisor_graph(
         sandbox_config=sandbox_config,
         subcall_config=subcall_config,
     )
-    record_run_started_event(args, traces, run_id, task, workspace, thread_id)
     state = HarnessState(
         task=task,
         workspace=str(workspace),
@@ -791,6 +810,10 @@ def run_supervisor_graph(
         token_budget=args.token_budget,
     )
     run_state = RunState.from_harness_state(state)
+    # Bind the supervisor's `run_id` to the one the caller created.
+    # This keeps every typed event under the same `runs` row.
+    run_state.request.run_id = run_id
+    run_state.request.thread_id = thread_id or run_id
     config = SupervisorConfig(
         max_turns=max_turns,
         max_subcalls_per_turn=max_subcalls_per_turn,
@@ -807,4 +830,8 @@ def run_supervisor_graph(
     )
     final = supervisor.run(run_state)
     harness_state = final.to_harness_state()
+    if owned_run:
+        # Internal callers that did not pass a `run_id` get a
+        # best-effort finish so the trace is not left `running`.
+        traces.finish_run(run_id, harness_state.status)
     return harness_state

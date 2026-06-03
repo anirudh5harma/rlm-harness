@@ -142,9 +142,63 @@ RLMTurnEvent = Union[
 ]
 
 
+def _local_workspace_tool_bindings() -> dict[str, Any]:
+    """Return the workspace-tool bindings exposed to the local REPL.
+
+    The local REPL is the fallback used when the sandbox (Docker) is
+    not enabled. It runs Python in the user's process, so it already
+    has full Python; the bindings here exist so a repl block that
+    references a tool by name (e.g. ``project_summary()``) resolves
+    the same way it does in the sandbox REPL. The model decides
+    whether to call them; the supervisor (Phase A) is responsible
+    for autonomy-mode enforcement.
+
+    The bindings are imported lazily so the runtime module can be
+    loaded in environments where ``sandbox.tools`` pulls in optional
+    dependencies that are not installed.
+    """
+    try:
+        from rlm_harness.sandbox import tools as _workspace_tools
+    except Exception:
+        return {}
+    return {
+        "read_file": _workspace_tools.read_file,
+        "read_file_slice": _workspace_tools.read_file_slice,
+        "chunk_file": _workspace_tools.chunk_file,
+        "read_first_existing": _workspace_tools.read_first_existing,
+        "list_files": _workspace_tools.list_files,
+        "project_overview": _workspace_tools.project_overview,
+        "project_summary": _workspace_tools.project_summary,
+        "project_audit": _workspace_tools.project_audit,
+        "propose_file_change": _workspace_tools.propose_file_change,
+        "list_pending_changes": _workspace_tools.list_pending_changes,
+        "apply_pending_change": _workspace_tools.apply_pending_change,
+        "clear_pending_changes": _workspace_tools.clear_pending_changes,
+        "write_file": _workspace_tools.write_file,
+        "apply_patch": _workspace_tools.apply_patch,
+        "run_shell": _workspace_tools.run_shell,
+        "git_status": _workspace_tools.git_status,
+        "git_diff": _workspace_tools.git_diff,
+        "git_log": _workspace_tools.git_log,
+        "search_code": _workspace_tools.search_code,
+        "tool_help": _workspace_tools.tool_help,
+        "tool_names": _workspace_tools.tool_names,
+    }
+
+
 class LocalRLMRepl:
     def __init__(self, runtime: RLMRuntime, context: Any):
         self.runtime = runtime
+        # Point the workspace tools at the runtime's workspace so
+        # relative paths (e.g. ``list_files(".")``) resolve against
+        # the project the supervisor is operating on, not the
+        # sandbox's hard-coded ``/workspace``.
+        try:
+            from rlm_harness.sandbox import tools as _workspace_tools
+
+            _workspace_tools.set_workspace(runtime.workspace)
+        except Exception:
+            pass
         self.namespace: dict[str, Any] = {
             "__name__": "__rlm_repl__",
             "context": context,
@@ -156,6 +210,13 @@ class LocalRLMRepl:
             "rlm_query_batched": self.rlm_query_batched,
             "complete_task": self.complete_task,
         }
+        # Inject the workspace tool surface so the local REPL has the
+        # same callable view of the project as the sandbox REPL. The
+        # model decides whether to call them; the supervisor (Phase A)
+        # enforces the autonomy mode separately. Without this binding
+        # a stub repl block such as `project_summary()` raises
+        # `NameError` and the run exits with status 1.
+        self.namespace.update(_local_workspace_tool_bindings())
 
     def execute(self, code: str) -> RLMObservation:
         stdout = io.StringIO()

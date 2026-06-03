@@ -9,6 +9,19 @@ from pathlib import Path
 from typing import Any, Optional
 
 WORKSPACE = Path("/workspace")
+
+
+def set_workspace(path: Path | str) -> None:
+    """Override the workspace root for the local REPL path.
+
+    The sandbox REPL mounts the project at ``/workspace``; the local
+    REPL runs in the user's process and uses the real workspace path.
+    The tools resolve all relative paths against this module-level
+    ``WORKSPACE`` constant, so the local REPL must point it at the
+    runtime's workspace before any tool is called.
+    """
+    global WORKSPACE
+    WORKSPACE = Path(path).resolve()
 DEFAULT_MAX_READ_BYTES = 200_000
 DEFAULT_TIMEOUT_S = 30.0
 IGNORED_DIRS = {
