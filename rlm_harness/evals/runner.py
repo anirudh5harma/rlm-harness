@@ -329,6 +329,116 @@ def combine_grades(*grades: GradeResult) -> GradeResult:
     return GradeResult(True, min(grade.score for grade in grades), output)
 
 
+@dataclass
+class RLMContextEfficiencyGrader:
+    """Grader for the long-horizon / long-context evals (Phase G).
+
+    Reads a recorded run from the trace store and asserts:
+    * the run completed (not stopped) within `max_turns` turns;
+    * the per-turn context preview (manifest) was under
+      `max_manifest_tokens` for every turn;
+    * the average sub-call count per turn is sane.
+    """
+
+    max_turns: int = 50
+    max_manifest_tokens: int = 20_000
+    max_avg_subcalls_per_turn: int = 8
+
+    def grade(self, workspace: Path, *, run_id: str) -> GradeResult:
+        from rlm_harness.tracing import TraceStore
+
+        store = TraceStore(workspace / "trace.db")
+        if store.get_run(run_id) is None:
+            return GradeResult(
+                passed=False,
+                score=0.0,
+                output=f"unknown run_id: {run_id}",
+            )
+        events = store.events(run_id)
+        if not events:
+            return GradeResult(
+                passed=False,
+                score=0.0,
+                output="no events recorded for this run",
+            )
+        run = store.get_run(run_id)
+
+        # 1. Run completed, not stopped.
+        if run["status"] not in {"done", "unverified", "verified"}:
+            return GradeResult(
+                passed=False,
+                score=0.0,
+                output=f"run did not complete: status={run['status']!r}",
+            )
+
+        # 2. Turn count under budget.
+        turn_starts = [e for e in events if e["kind"] == "turn_started"]
+        turn_count = len(turn_starts)
+        if turn_count > self.max_turns:
+            return GradeResult(
+                passed=False,
+                score=0.0,
+                output=(
+                    f"turn count {turn_count} exceeds budget {self.max_turns}"
+                ),
+            )
+
+        # 3. Per-turn context preview under manifest budget.
+        over_budget: list[tuple[int, int]] = []
+        for event in turn_starts:
+            preview = str(event["payload"].get("context_preview") or "")
+            tokens = max(1, len(preview) // 4)
+            if tokens > self.max_manifest_tokens:
+                over_budget.append((int(event["payload"]["turn_index"]), tokens))
+        if over_budget:
+            turns_str = ", ".join(
+                f"turn {idx} ({tok} tokens)"
+                for idx, tok in over_budget
+            )
+            return GradeResult(
+                passed=False,
+                score=0.0,
+                output=(
+                    f"manifest over budget on: {turns_str}; "
+                    f"max={self.max_manifest_tokens}"
+                ),
+            )
+
+        # 4. Average sub-calls per turn under budget.
+        turn_finishes = [e for e in events if e["kind"] == "turn_finished"]
+        if turn_finishes:
+            total_subcalls = sum(
+                int(e["payload"].get("subcalls", 0)) for e in turn_finishes
+            )
+            avg_subcalls = total_subcalls / len(turn_finishes)
+            if avg_subcalls > self.max_avg_subcalls_per_turn:
+                return GradeResult(
+                    passed=False,
+                    score=0.0,
+                    output=(
+                        f"avg sub-calls per turn {avg_subcalls:.2f} exceeds "
+                        f"budget {self.max_avg_subcalls_per_turn}"
+                    ),
+                )
+        return GradeResult(
+            passed=True,
+            score=1.0,
+            output=(
+                f"efficiency: {turn_count} turns, "
+                f"manifest under {self.max_manifest_tokens} tokens, "
+                f"avg sub-calls {self._avg_subcalls(turn_finishes):.2f}"
+            ),
+        )
+
+    @staticmethod
+    def _avg_subcalls(turn_finishes: list) -> float:
+        if not turn_finishes:
+            return 0.0
+        return sum(
+            int(e["payload"].get("subcalls", 0)) for e in turn_finishes
+        ) / len(turn_finishes)
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 

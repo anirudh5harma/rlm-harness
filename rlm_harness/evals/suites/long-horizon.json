@@ -1,0 +1,66 @@
+{
+  "name": "long-horizon",
+  "cases": [
+    {
+      "id": "read-three-files-in-order",
+      "prompt": "Read alpha.txt, then bravo.txt, then charlie.txt. After reading all three, report the file sizes.",
+      "test_command": "python -c \"print('ok')\"",
+      "files": {
+        "alpha.txt": "alpha content one\n",
+        "bravo.txt": "bravo content two\n",
+        "charlie.txt": "charlie content three\n"
+      },
+      "output_contains": [
+        "alpha.txt",
+        "bravo.txt",
+        "charlie.txt"
+      ],
+      "metadata": {
+        "turn_budget": 6,
+        "persistent_state_requirement": "the harness must read the three files in order across multiple turns",
+        "expected_subcalls": "1-3 per turn",
+        "expected_status": "done"
+      }
+    },
+    {
+      "id": "fix-then-verify",
+      "prompt": "Inspect test_mathlib.py, fix the failing assertion in mathlib.py, then run the test command and report the result.",
+      "test_command": "python -m unittest test_mathlib -v",
+      "files": {
+        "mathlib.py": "def add(a, b):\n    return a - b\n",
+        "test_mathlib.py": "import unittest\n\nfrom mathlib import add\n\n\nclass MathTests(unittest.TestCase):\n    def test_adds_numbers(self):\n        self.assertEqual(add(2, 3), 5)\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n"
+      },
+      "output_contains": [
+        "Verification",
+        "OK"
+      ],
+      "metadata": {
+        "turn_budget": 10,
+        "persistent_state_requirement": "the harness must remember the test command and use it for verification",
+        "expected_subcalls": "2-4 per turn",
+        "expected_status": "done"
+      }
+    },
+    {
+      "id": "navigate-directory-tree",
+      "prompt": "Find all *.py files in src/ and list them with their line counts. The repository has three Python modules: mod_a.py, mod_b.py, mod_c.py under src/.",
+      "test_command": "python -c \"print('ok')\"",
+      "files": {
+        "src/mod_a.py": "# mod_a\nx = 1\ny = 2\nz = 3\n",
+        "src/mod_b.py": "# mod_b\nx = 1\ny = 2\n",
+        "src/mod_c.py": "# mod_c\nx = 1\ny = 2\nz = 3\nw = 4\n"
+      },
+      "output_contains": [
+        "mod_a.py",
+        "mod_b.py",
+        "mod_c.py"
+      ],
+      "metadata": {
+        "turn_budget": 8,
+        "persistent_state_requirement": "the harness must build up a list across multiple turns",
+        "expected_subcalls": "1-3 per turn",
+        "expected_status": "done"
+      }
+    }
+  ]
+}

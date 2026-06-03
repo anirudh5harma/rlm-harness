@@ -1,0 +1,34 @@
+{
+  "name": "long-context",
+  "cases": [
+    {
+      "id": "find-buried-secret-in-200k-workspace",
+      "prompt": "The repository has many files. Find the file buried in the middle that contains the unique token 'the auth token for the buried file' and report it.",
+      "test_command": "python -c \"print('ok')\"",
+      "files": {
+        "buried/middle/secret.md": "the auth token for the buried file\n"
+      },
+      "metadata": {
+        "manifest_budget_tokens": 20000,
+        "expected_turn_count": "1-3",
+        "expected_status": "done",
+        "context_kind": "long-context",
+        "needle_file": "buried/middle/secret.md"
+      }
+    },
+    {
+      "id": "summarize-large-readme",
+      "prompt": "Read README.md and write a 3-sentence summary. The README is long.",
+      "test_command": "python -c \"print('ok')\"",
+      "files": {
+        "README.md": "# Long Project\n\nThis is a long README. It is repeated many times.\n\nThe project is a CLI for testing.\n\nIt uses Python.\n\nIt has tests.\n\nIt has a CLI.\n\nThe CLI is invoked via `harness`.\n"
+      },
+      "metadata": {
+        "manifest_budget_tokens": 20000,
+        "expected_turn_count": "1-2",
+        "expected_status": "done",
+        "context_kind": "long-context"
+      }
+    }
+  ]
+}
