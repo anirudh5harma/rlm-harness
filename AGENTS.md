@@ -262,6 +262,14 @@ pytest tests/test_default_supervisor_backend.py -x
 # the supervisor (the new control plane) and exit with status=done.
 # `--graph-backend auto` is an alias for `supervisor`; `simple` /
 # `langgraph` remain opt-in for users who need the legacy paths.
+
+# Phase I.3 — Streaming path retries transient provider errors
+pytest tests/test_model_client.py -x -k StreamRetry
+pytest tests/test_rlm_runtime.py -x -k StreamErrorTranslation
+# `LMClient.stream` retries HTTP 408/425/429/500/502/503/504/522/524
+# and `URLError` with exponential backoff (3 attempts by default).
+# On exhaustion, `_stream_model_call` raises `LMClientError` so
+# `__rlm_stream_error__:` no longer leaks into the final answer.
 ```
 
 ---

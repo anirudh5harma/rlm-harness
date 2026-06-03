@@ -45,8 +45,9 @@ related: production-grade-harness-revamp.md
 | H.3 — install smoke (fresh venv + pip install + harness) | ✅ done | `pytest tests/test_install_smoke.py -x` 1 passed | 2026-06-02 |
 | H.4 — Phase H gate | ✅ green | **412 tests pass, lint clean, fresh-user path works** | 2026-06-02 |
 | PIVOT PLAN COMPLETE | ✅ done | All 8 phases green; harness ready for users | 2026-06-02 |
-| I.1 — default backend = supervisor | ✅ done | `pytest tests/test_default_supervisor_backend.py -x` 4 passed; 418 tests pass | 2026-06-03 |
+| I.1 — default backend = supervisor | ✅ done | `pytest tests/test_default_supervisor_backend.py -x` 5 passed; 426 tests pass | 2026-06-03 |
 | I.2 — local RLM REPL exposes workspace tools | ✅ done | `sandbox.tools.set_workspace` + `_local_workspace_tool_bindings` injected into `LocalRLMRepl`; 4 new tests in `tests/test_default_supervisor_backend.py` | 2026-06-03 |
+| I.3 — streaming path retries transient provider errors | ✅ done | `LMClient.stream` retries on HTTP 408/425/429/500/502/503/504/522/524 + URLError with exponential backoff (0.5s, 1.0s, 2.0s, max 3 attempts); `_stream_model_call` raises `LMClientError` on exhaustion so `__rlm_stream_error__:` no longer leaks into the final answer; 7 new tests in `tests/test_model_client.py` + 3 in `tests/test_rlm_runtime.py` + 1 regression in `tests/test_default_supervisor_backend.py` | 2026-06-03 |
 | D — Strict verification | ⏸ not started | four statuses; `done` requires `verified` | — |
 | E — Session tree + replay | ⏸ not started | JSONL tree + `trace show / replay / fork` | — |
 | F — CLI trim + extension model | ⏸ not started | ≤12 top-level commands; `harness install` | — |
@@ -140,6 +141,27 @@ Legend: ✅ done · ⏳ in progress · ⏸ not started · ❌ blocked
   autonomy mode continues to gate writes; the tool binding
   only matches the sandbox surface that real provider
   models expect.
+- **2026-06-03 — Streaming path retries transient provider
+  errors; exhaustion surfaces as a clean error.** A user
+  reported that an OpenRouter HTTP 503 leaked as
+  `__rlm_stream_error__:model stream failed: HTTP 503 ...`
+  into the final answer of a default invocation. The
+  streaming path now retries transient statuses (408, 425,
+  429, 500, 502, 503, 504, 522, 524) and connection-level
+  `URLError` with exponential backoff (0.5s, 1.0s, 2.0s,
+  capped at 8s) up to 3 attempts. Once retries are
+  exhausted, `_stream_model_call` raises `LMClientError`
+  instead of returning the legacy `__rlm_stream_error__:`
+  prefix; the supervisor's existing `LMClientError` handler
+  surfaces it through the CLI as a clear `Error: ...` line
+  with `status=error` and a JSON `error` field. Retry
+  attempts are bounded *before* any token is yielded, so
+  a successful retry does not duplicate output.
+  Configuration: `LMClient.max_stream_retries` (default 3)
+  and `LMClient.stream_retry_base_delay_s` (default 0.5).
+  Tests: 4 stream-retry tests in `test_model_client.py`,
+  3 stream-error-translation tests in `test_rlm_runtime.py`,
+  1 CLI regression test in `test_default_supervisor_backend.py`.
 - **2026-06-02 — `Supervisor.run()` exits on `done` or `error`
   immediately; `stopped` only at `max_turns`.** A turn that emits a
   final answer ends the run. A turn that runs out of iterations

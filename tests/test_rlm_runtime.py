@@ -2,11 +2,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rlm_harness.model_client import LMClient
+from rlm_harness.model_client import LMClient, LMClientError
 from rlm_harness.rlm.runtime import (
+    RLM_STREAM_ERROR_PREFIX,
     RLM_SYSTEM_PROMPT,
     RLMObservation,
     RLMRuntime,
+    _raise_on_stream_error,
     build_bootstrap_code,
     find_repl_blocks,
     format_observation,
@@ -127,6 +129,66 @@ class RLMRuntimeTests(unittest.TestCase):
         self.assertIn("Do not answer by\nprinting raw source code", RLM_SYSTEM_PROMPT)
         self.assertIn("file inventory", RLM_SYSTEM_PROMPT)
         self.assertIn("friendly, ordinary English", RLM_SYSTEM_PROMPT)
+
+
+class StreamErrorTranslationTests(unittest.TestCase):
+    """The streaming path retries transient errors. When retries
+    are exhausted, the runtime must surface the failure as an
+    ``LMClientError`` so the supervisor's error path takes over
+    — the user must not see ``__rlm_stream_error__:...`` in
+    their final answer.
+    """
+
+    def test_stream_error_prefix_translates_to_lmclient_error(self):
+        with self.assertRaises(LMClientError) as ctx:
+            _raise_on_stream_error(
+                f"{RLM_STREAM_ERROR_PREFIX}HTTP 503 Service Unavailable (after 3 attempts)"
+            )
+        self.assertIn("HTTP 503", str(ctx.exception))
+        self.assertIn("after 3 attempts", str(ctx.exception))
+
+    def test_non_stream_error_passes_through(self):
+        # Anything without the prefix is a normal model
+        # response and must not be turned into an exception.
+        _raise_on_stream_error("Hello, world.")
+        _raise_on_stream_error("")
+
+    def test_streaming_model_call_raises_on_provider_error(self):
+        """When the model's stream produces an error event
+        (after retries are exhausted), the runtime must raise
+        an ``LMClientError`` instead of returning a prefixed
+        string the supervisor would otherwise forward to the
+        user as the final answer.
+        """
+        from rlm_harness.types import TokenEvent
+
+        class ErrorStreamingClient(LMClient):
+            def __init__(self):
+                super().__init__(provider="stub", model="error")
+
+            def stream(self, messages, max_tokens=512, temperature=0.2):
+                yield TokenEvent(type="start", model="error", provider="stub")
+                yield TokenEvent(
+                    type="error",
+                    error="HTTP 503 Service Unavailable (after 3 attempts)",
+                    provider="stub",
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            runtime = RLMRuntime(
+                ErrorStreamingClient(),
+                workspace=workspace,
+                max_iterations=1,
+                sandbox_enabled=False,
+            )
+            with self.assertRaises(LMClientError) as ctx:
+                list(runtime.stream_turn("hi", context={"task": "hi"}))
+        self.assertIn("HTTP 503", str(ctx.exception))
+        # The error message must NOT carry the legacy
+        # ``__rlm_stream_error__:`` prefix the user used to
+        # see in their final answer.
+        self.assertFalse(str(ctx.exception).startswith(RLM_STREAM_ERROR_PREFIX))
 
 
 if __name__ == "__main__":

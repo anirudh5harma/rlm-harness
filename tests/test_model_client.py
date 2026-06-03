@@ -258,5 +258,164 @@ class LMClientTests(unittest.TestCase):
         compile(blocks[0], "<stub-rlm>", "exec")
 
 
+class StreamRetryTests(unittest.TestCase):
+    """Streaming-path retry on transient provider errors.
+
+    HTTP 503 from OpenRouter (and similar transient 5xx/4xx
+    codes) should not surface as the final answer. The streaming
+    path retries with exponential backoff before giving up.
+    """
+
+    def _http_503(self, request):
+        return urllib.error.HTTPError(
+            request.full_url,
+            503,
+            "Service Unavailable",
+            hdrs={},
+            fp=BytesIO(b'{"error":{"message":"overloaded"}}'),
+        )
+
+    def test_stream_retries_on_503_and_succeeds(self):
+        seen: list[int] = []
+
+        def fake_urlopen(request, timeout):
+            seen.append(len(seen) + 1)
+            if len(seen) < 2:
+                raise self._http_503(request)
+            return FakeResponse("hi from attempt")
+
+        client = LMClient(
+            provider="openai-compatible",
+            model="test-model",
+            base_url="http://127.0.0.1:8080/v1",
+            api_key="token",
+            max_stream_retries=3,
+            stream_retry_base_delay_s=0.0,
+        )
+        with patch("urllib.request.urlopen", fake_urlopen):
+            events = list(
+                client.stream(
+                    [Msg(role="user", content="hello")],
+                    max_tokens=64,
+                    temperature=0.0,
+                )
+            )
+
+        kinds = [event.type for event in events]
+        # The first attempt raises HTTPError; the second
+        # succeeds. The contract is `start → 0+ delta → finish`.
+        self.assertEqual(kinds[0], "start")
+        self.assertEqual(kinds[-1], "finish")
+        self.assertNotIn("error", kinds)
+        self.assertEqual(seen, [1, 2])
+
+    def test_stream_exhausts_retries_and_yields_error_event(self):
+        seen: list[int] = []
+
+        def fake_urlopen(request, timeout):
+            seen.append(len(seen) + 1)
+            raise self._http_503(request)
+
+        client = LMClient(
+            provider="openai-compatible",
+            model="test-model",
+            base_url="http://127.0.0.1:8080/v1",
+            api_key="token",
+            max_stream_retries=3,
+            stream_retry_base_delay_s=0.0,
+        )
+        with patch("urllib.request.urlopen", fake_urlopen):
+            events = list(
+                client.stream(
+                    [Msg(role="user", content="hello")],
+                    max_tokens=64,
+                    temperature=0.0,
+                )
+            )
+
+        kinds = [event.type for event in events]
+        # All 3 attempts fail; the final event is an `error`
+        # event whose message includes the attempt count so the
+        # user can tell what happened.
+        self.assertEqual(kinds[-1], "error")
+        error_event = events[-1]
+        self.assertIn("HTTP 503", error_event.error)
+        self.assertIn("after 3 attempts", error_event.error)
+        self.assertEqual(seen, [1, 2, 3])
+
+    def test_stream_does_not_retry_non_transient_status(self):
+        """HTTP 403 (auth) is not transient — the client should
+        fail immediately, not waste retries on a permanent
+        error.
+        """
+        seen: list[int] = []
+
+        def fake_urlopen(request, timeout):
+            seen.append(len(seen) + 1)
+            raise urllib.error.HTTPError(
+                request.full_url,
+                403,
+                "Forbidden",
+                hdrs={},
+                fp=BytesIO(b'{"error":{"message":"bad key"}}'),
+            )
+
+        client = LMClient(
+            provider="openai-compatible",
+            model="test-model",
+            base_url="http://127.0.0.1:8080/v1",
+            api_key="bad",
+            max_stream_retries=3,
+            stream_retry_base_delay_s=0.0,
+        )
+        with patch("urllib.request.urlopen", fake_urlopen):
+            events = list(
+                client.stream(
+                    [Msg(role="user", content="hello")],
+                    max_tokens=64,
+                    temperature=0.0,
+                )
+            )
+
+        self.assertEqual(seen, [1])
+        self.assertEqual(events[-1].type, "error")
+        self.assertIn("HTTP 403", events[-1].error)
+        # No "(after N attempts)" suffix on non-transient errors.
+        self.assertNotIn("after ", events[-1].error)
+
+    def test_stream_retries_on_url_error(self):
+        """Connection-level failures (URLError) are also
+        transient; the client should retry and eventually give
+        up.
+        """
+        seen: list[int] = []
+
+        def fake_urlopen(request, timeout):
+            seen.append(len(seen) + 1)
+            raise urllib.error.URLError("connection refused")
+
+        client = LMClient(
+            provider="openai-compatible",
+            model="test-model",
+            base_url="http://127.0.0.1:8080/v1",
+            api_key="token",
+            max_stream_retries=2,
+            stream_retry_base_delay_s=0.0,
+        )
+        with patch("urllib.request.urlopen", fake_urlopen):
+            events = list(
+                client.stream(
+                    [Msg(role="user", content="hello")],
+                    max_tokens=64,
+                    temperature=0.0,
+                )
+            )
+
+        self.assertEqual(seen, [1, 2])
+        self.assertEqual(events[-1].type, "error")
+        self.assertIn("connection refused", events[-1].error)
+        self.assertIn("after 2 attempts", events[-1].error)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -180,6 +180,80 @@ class DefaultSupervisorTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["status"], "done")
 
+    def test_default_run_surfaces_provider_503_as_clean_error(self):
+        """A regression test for the user-reported bug where a
+        default ``harness ask <prompt>`` invocation against a
+        provider returning HTTP 503 surfaced the
+        ``__rlm_stream_error__:...`` prefix in the final
+        answer. With the streaming retry path in place, the
+        user must see a clean error (the prefix must NOT leak
+        into the final answer).
+        """
+        from unittest.mock import patch
+
+        from rlm_harness.model_client import LMClient
+        from rlm_harness.types import TokenEvent
+
+        class AlwaysFailingClient(LMClient):
+            def __init__(self):
+                super().__init__(
+                    provider="stub",
+                    model="stub",
+                    max_stream_retries=2,
+                    stream_retry_base_delay_s=0.0,
+                )
+
+            def stream(self, messages, max_tokens=512, temperature=0.2):
+                yield TokenEvent(
+                    type="start", model=self.model, provider=self.provider
+                )
+                yield TokenEvent(
+                    type="error",
+                    error="HTTP 503 Service Unavailable (after 2 attempts)",
+                    provider=self.provider,
+                )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir)
+            (workspace / "README.md").write_text(
+                "# Demo\n\nTiny project.\n", encoding="utf-8"
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), patch(
+                "rlm_harness.task_runtime.build_client", lambda args: AlwaysFailingClient()
+            ):
+                exit_code = cli.main(
+                    [
+                        "ask",
+                        "hi",
+                        "--workspace",
+                        str(workspace),
+                        "--provider",
+                        "stub",
+                        "--model",
+                        "stub",
+                        "--no-memory",
+                        "--no-sandbox",
+                        "--json",
+                    ]
+                )
+            output = stdout.getvalue()
+            stderr_output = stderr.getvalue()
+
+        self.assertEqual(exit_code, 1)
+        # The legacy bug was that the final answer carried the
+        # ``__rlm_stream_error__:...`` prefix. With the fix in
+        # place, the error is surfaced through the CLI's normal
+        # ``Error:`` channel instead.
+        self.assertNotIn("__rlm_stream_error__", output)
+        self.assertNotIn("__rlm_stream_error__", stderr_output)
+        # The error message must reach the user via the JSON
+        # ``error`` field on stdout.
+        payload = json.loads(output)
+        self.assertEqual(payload["status"], "error")
+        self.assertIn("HTTP 503", payload["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

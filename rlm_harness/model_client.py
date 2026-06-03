@@ -27,6 +27,15 @@ class LMClient:
     base_url: str = "http://127.0.0.1:8080/v1"
     api_key: Optional[str] = None
     timeout_s: int = 120
+    # Retry the streaming call on transient provider errors
+    # (HTTP 408/425/429/500/502/503/504/522/524 or URLError). The
+    # default is 3 attempts with exponential backoff
+    # (0.5s, 1.0s, 2.0s) so a brief provider blip does not
+    # abort a long-running task. Retries are only attempted
+    # before any token has been yielded; once the model
+    # starts streaming, retrying would duplicate output.
+    max_stream_retries: int = 3
+    stream_retry_base_delay_s: float = 0.5
 
     @maybe_traceable("LMClient.complete", run_type="llm")
     def complete(
@@ -387,53 +396,100 @@ class LMClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         yield TokenEvent(type="start", model=self.model, provider=self.provider)
-        try:
-            request = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers=headers,
-                method="POST",
-            )
-            with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
-                for event in self._iter_sse_events(response):
-                    if event is None:
-                        # stream terminator (`data: [DONE]`)
-                        break
-                    kind = event.get("type", "delta")
-                    if kind == "error":
-                        yield TokenEvent(
-                            type="error",
-                            error=str(event.get("error") or "stream error"),
-                            model=event.get("model", self.model),
-                            provider=self.provider,
-                        )
-                        return
-                    if kind == "finish":
-                        yield TokenEvent(
-                            type="finish",
-                            model=event.get("model") or self.model,
-                            provider=self.provider,
-                            usage=event.get("usage", {}),
-                            finish_reason=event.get("finish_reason"),
-                        )
-                        return
-                    if kind == "delta":
-                        yield TokenEvent(
-                            type="delta",
-                            delta=str(event.get("delta") or ""),
-                            model=event.get("model", self.model),
-                            provider=self.provider,
-                        )
-        except urllib.error.HTTPError as exc:
-            detail = _read_http_error_detail(exc)
-            message = f"model stream failed: HTTP {exc.code} {exc.reason}"
-            if detail:
-                message = f"{message}: {detail}"
-            yield TokenEvent(type="error", error=message, provider=self.provider)
-            return
-        except (json.JSONDecodeError, urllib.error.URLError) as exc:
-            yield TokenEvent(type="error", error=str(exc), provider=self.provider)
-            return
+        # Retry transient provider errors before any token is
+        # yielded. Once `urlopen` returns and the first SSE frame
+        # has been read, we commit to the response — duplicating
+        # a half-streamed answer would be worse than failing the
+        # turn, and the supervisor can drive the next iteration.
+        max_attempts = max(1, int(self.max_stream_retries or 1))
+        for attempt in range(1, max_attempts + 1):
+            try:
+                request = urllib.request.Request(
+                    url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers=headers,
+                    method="POST",
+                )
+                with urllib.request.urlopen(
+                    request, timeout=self.timeout_s
+                ) as response:
+                    for event in self._iter_sse_events(response):
+                        if event is None:
+                            # stream terminator (`data: [DONE]`)
+                            break
+                        kind = event.get("type", "delta")
+                        if kind == "error":
+                            yield TokenEvent(
+                                type="error",
+                                error=str(event.get("error") or "stream error"),
+                                model=event.get("model", self.model),
+                                provider=self.provider,
+                            )
+                            return
+                        if kind == "finish":
+                            yield TokenEvent(
+                                type="finish",
+                                model=event.get("model") or self.model,
+                                provider=self.provider,
+                                usage=event.get("usage", {}),
+                                finish_reason=event.get("finish_reason"),
+                            )
+                            return
+                        if kind == "delta":
+                            yield TokenEvent(
+                                type="delta",
+                                delta=str(event.get("delta") or ""),
+                                model=event.get("model", self.model),
+                                provider=self.provider,
+                            )
+                # Provider closed the stream without raising —
+                # fall through to the synthetic `finish` event
+                # below.
+                break
+            except urllib.error.HTTPError as exc:
+                detail = _read_http_error_detail(exc)
+                message = f"model stream failed: HTTP {exc.code} {exc.reason}"
+                if detail:
+                    message = f"{message}: {detail}"
+                if (
+                    _is_transient_status(exc.code)
+                    and attempt < max_attempts
+                ):
+                    _sleep_before_retry(
+                        attempt, self.stream_retry_base_delay_s
+                    )
+                    continue
+                if _is_transient_status(exc.code):
+                    message = (
+                        f"{message} (after {attempt} attempts)"
+                    )
+                yield TokenEvent(
+                    type="error", error=message, provider=self.provider
+                )
+                return
+            except urllib.error.URLError as exc:
+                if attempt < max_attempts:
+                    _sleep_before_retry(
+                        attempt, self.stream_retry_base_delay_s
+                    )
+                    continue
+                yield TokenEvent(
+                    type="error",
+                    error=(
+                        f"model stream failed: {exc} "
+                        f"(after {attempt} attempts)"
+                    ),
+                    provider=self.provider,
+                )
+                return
+            except (json.JSONDecodeError, TimeoutError) as exc:
+                # Transport-level errors that arrive mid-stream
+                # are not retried — we may have already yielded
+                # a partial response to the supervisor.
+                yield TokenEvent(
+                    type="error", error=str(exc), provider=self.provider
+                )
+                return
 
         # Provider closed the stream without an explicit finish event.
         # Emit one so the contract (`start` then `finish`) is preserved.
@@ -544,6 +600,31 @@ def should_retry_without_response_format(
             "not supported",
         )
     )
+
+
+# HTTP statuses that are commonly transient — the provider is
+# overloaded, rate-limiting, or temporarily unreachable. A short
+# backoff almost always succeeds.
+TRANSIENT_HTTP_STATUSES = frozenset(
+    {408, 425, 429, 500, 502, 503, 504, 522, 524}
+)
+
+
+def _is_transient_status(status_code: int) -> bool:
+    return status_code in TRANSIENT_HTTP_STATUSES
+
+
+def _sleep_before_retry(attempt: int, base_delay_s: float) -> None:
+    """Exponential backoff: ``base * 2 ** (attempt - 1)``.
+
+    Capped at 8 seconds so a long retry chain does not stall the
+    CLI for a minute. ``time.sleep`` is a no-op when ``base_delay_s``
+    is zero or negative, which lets tests disable the backoff.
+    """
+    if base_delay_s <= 0:
+        return
+    delay = min(8.0, base_delay_s * (2 ** (attempt - 1)))
+    time.sleep(delay)
 
 
 def post_openai_compatible_chat(

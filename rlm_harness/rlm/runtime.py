@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Union
 
-from rlm_harness.model_client import LMClient
+from rlm_harness.model_client import LMClient, LMClientError
 from rlm_harness.sandbox import (
     DockerREPL,
     RecursiveCompletionResult,
@@ -565,11 +565,14 @@ class RLMRuntime:
                 error = event.error or "stream error"
                 break
         if error is not None:
-            # Surface as a sandbox-style error so the supervisor can
-            # classify and recover; do not raise (callers are the
-            # non-streaming `completion()` and the streaming
-            # `stream_turn()`, neither of which is allowed to raise).
-            return f"__rlm_stream_error__:{error}", usage
+            # The streaming path already retried transient
+            # provider errors; the only thing left is a
+            # permanent failure. Raise so the supervisor's
+            # error path (LMClientError handler) takes over
+            # and the run ends with status=error — instead of
+            # leaking ``__rlm_stream_error__:...`` into the
+            # final answer that the user sees.
+            raise LMClientError(error)
         response = "".join(chunks)
         self._add_usage(usage.get("prompt_tokens"), usage.get("completion_tokens"))
         return response, usage
@@ -600,6 +603,7 @@ class RLMRuntime:
 
         for iteration in range(1, self.max_iterations + 1):
             completion = self.client.complete(messages, max_tokens=self.max_tokens, temperature=0.1)
+            _raise_on_stream_error(completion.content)
             self._add_usage(completion.prompt_tokens, completion.completion_tokens)
             response = completion.content
             responses.append(response)
@@ -974,6 +978,27 @@ def is_json_serializable(value: Any) -> bool:
     except TypeError:
         return False
     return True
+
+
+RLM_STREAM_ERROR_PREFIX = "__rlm_stream_error__:"
+
+
+def _raise_on_stream_error(content: str) -> None:
+    """Translate a streamed-error message into an ``LMClientError``.
+
+    The non-streaming ``LMClient.complete`` path can also surface
+    a stream error if a provider encodes the failure in the
+    response body instead of as an HTTP status. The
+    ``__rlm_stream_error__:`` prefix is the legacy convention
+    the supervisor already knows; raise so the run ends with
+    ``status=error`` instead of leaking the prefix into the
+    final answer that the user sees.
+    """
+    if not isinstance(content, str):
+        return
+    if not content.startswith(RLM_STREAM_ERROR_PREFIX):
+        return
+    raise LMClientError(content[len(RLM_STREAM_ERROR_PREFIX) :])
 
 
 def observation_from_execution(code: str, result: ExecutionResult) -> RLMObservation:
