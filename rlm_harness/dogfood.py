@@ -137,6 +137,11 @@ def run_dogfood(
                 timeout_s,
             )
         )
+    # Phase G: long-horizon and long-context are regression
+    # suites run separately via `harness eval long-horizon` /
+    # `harness eval long-context`. They are not part of the
+    # dogfood release gate, which is the daily-driver smoke
+    # test a fresh user runs.
 
     feedback = run_feedback_smoke(work_root / "feedback")
     install = (
