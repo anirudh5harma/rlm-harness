@@ -27,7 +27,7 @@ REPL_BLOCK_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 MAX_OBSERVATION_CODE_CHARS = 8_000
-MAX_OBSERVATION_STREAM_CHARS = 12_000
+MAX_OBSERVATION_STREAM_CHARS = 10_000
 CONTEXT_PREVIEW_CHARS = 2000
 
 
@@ -806,7 +806,7 @@ class RLMRuntime:
         # (default 20k tokens). We do *not* truncate it here: a
         # half-manifest is worse than no manifest, and the
         # supervisor can always build a tighter one.
-        manifest_text = serialize_context(manifest)
+        manifest_text = serialize_manifest_for_prompt(manifest)
         return [
             Msg(role="system", content=RLM_SYSTEM_PROMPT),
             Msg(
@@ -883,17 +883,51 @@ def format_observation(observation: RLMObservation) -> str:
     parts = [f"Code executed:\n```python\n{code}\n```", f"Status: {observation.status}"]
     if code_truncated:
         parts.append("Code note: truncated before returning to the model.")
+    stream_budgets = _observation_stream_budgets(observation)
     if observation.stdout:
-        stdout, truncated = truncate_text(observation.stdout, MAX_OBSERVATION_STREAM_CHARS)
+        stdout, truncated = truncate_text(observation.stdout, stream_budgets["stdout"])
         parts.append("STDOUT:\n" + stdout)
         if truncated or observation.stdout_truncated:
             parts.append("STDOUT note: truncated before returning to the model.")
     if observation.stderr:
-        stderr, truncated = truncate_text(observation.stderr, MAX_OBSERVATION_STREAM_CHARS)
+        stderr, truncated = truncate_text(observation.stderr, stream_budgets["stderr"])
         parts.append("STDERR:\n" + stderr)
         if truncated or observation.stderr_truncated:
             parts.append("STDERR note: truncated before returning to the model.")
     return "\n\n".join(parts)
+
+
+def _observation_stream_budgets(observation: RLMObservation) -> dict[str, int]:
+    streams = {
+        "stdout": len(observation.stdout),
+        "stderr": len(observation.stderr),
+    }
+    present = [name for name, length in streams.items() if length > 0]
+    if not present:
+        return {"stdout": 0, "stderr": 0}
+
+    remaining_budget = MAX_OBSERVATION_STREAM_CHARS
+    remaining_streams = set(present)
+    budgets = {"stdout": 0, "stderr": 0}
+    while remaining_streams:
+        share = remaining_budget // len(remaining_streams)
+        resolved = [
+            name
+            for name in remaining_streams
+            if streams[name] <= share
+        ]
+        if not resolved:
+            break
+        for name in resolved:
+            budgets[name] = streams[name]
+            remaining_budget -= budgets[name]
+            remaining_streams.remove(name)
+
+    if remaining_streams:
+        share = max(1, remaining_budget // len(remaining_streams))
+        for name in remaining_streams:
+            budgets[name] = share
+    return budgets
 
 
 def truncate_text(text: str, max_chars: int) -> tuple[str, bool]:
@@ -916,6 +950,32 @@ def serialize_context(context: Any) -> str:
         return json.dumps(context, sort_keys=True)
     except TypeError:
         return repr(context)
+
+
+def serialize_manifest_for_prompt(manifest: dict) -> str:
+    compact = _compact_json(manifest)
+    hashes = manifest.get("content_hashes")
+    if not isinstance(hashes, list) or not hashes:
+        return compact
+
+    runs: list[list[Any]] = []
+    for content_hash in hashes:
+        if runs and runs[-1][0] == content_hash:
+            runs[-1][1] += 1
+        else:
+            runs.append([content_hash, 1])
+    if len(runs) == len(hashes):
+        return compact
+
+    encoded = dict(manifest)
+    encoded["content_hashes"] = runs
+    encoded["content_hashes_encoding"] = "rle:v1"
+    encoded_text = _compact_json(encoded)
+    return encoded_text if len(encoded_text) < len(compact) else compact
+
+
+def _compact_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 def manifest_for_context(context: Any) -> dict:

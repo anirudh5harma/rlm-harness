@@ -123,6 +123,23 @@ class RLMRuntimeTests(unittest.TestCase):
         self.assertIn("truncated", rendered)
         self.assertIn("narrow the query", rendered)
 
+    def test_observation_format_shares_budget_across_streams(self):
+        observation = RLMObservation(
+            code="print('x')",
+            stdout="a" * 30_000,
+            stderr="b" * 30_000,
+            status="error",
+        )
+
+        rendered = format_observation(observation)
+
+        self.assertLess(len(rendered), 12_000)
+        self.assertIn("STDOUT:", rendered)
+        self.assertIn("STDERR:", rendered)
+        self.assertIn("STDOUT note: truncated", rendered)
+        self.assertIn("STDERR note: truncated", rendered)
+        self.assertIn("narrow the query", rendered)
+
     def test_rlm_prompt_routes_project_overview_to_summary_tool(self):
         self.assertIn("project_summary", RLM_SYSTEM_PROMPT)
         self.assertIn("project_audit", RLM_SYSTEM_PROMPT)
