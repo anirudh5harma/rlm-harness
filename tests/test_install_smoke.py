@@ -9,10 +9,9 @@ The pivot plan's Phase H gate:
      repo checkout."
 
 This test simulates the "fresh venv" path: a throwaway
-venv is created, the harness package is installed in editable
-mode from the repo root, and the resulting `harness` binary
-runs `--help` and `doctor --json` without needing the test
-runner.
+venv is created, the harness package is installed from the
+repo root, and the resulting `harness` binary runs `--help`
+and `doctor --json` without needing the test runner.
 """
 import json
 import subprocess
@@ -41,8 +40,6 @@ class InstallSmokeTests(unittest.TestCase):
             pip_bin = venv_dir / "bin" / "pip"
             harness_bin = venv_dir / "bin" / "harness"
 
-            # Install the package (regular install, not editable,
-            # so we exercise the same code path as a real user).
             install = subprocess.run(
                 [
                     str(pip_bin),
@@ -59,15 +56,11 @@ class InstallSmokeTests(unittest.TestCase):
                 0,
                 msg=f"pip install failed: {install.stderr[:2000]}",
             )
-            # The harness binary should now be on PATH inside
-            # the venv.
             self.assertTrue(
                 harness_bin.exists(),
                 f"harness binary not found at {harness_bin}",
             )
 
-            # `harness --help` should exit 0 and list the
-            # 12 user-facing top-level commands.
             help_result = subprocess.run(
                 [str(harness_bin), "--help"],
                 capture_output=True,
@@ -75,9 +68,6 @@ class InstallSmokeTests(unittest.TestCase):
                 timeout=30,
             )
             self.assertEqual(help_result.returncode, 0, msg=help_result.stderr)
-            # The help output mentions the 12 commands; we
-            # check for a few representative names instead of
-            # all 12 to keep the assertion robust.
             for command in ("ask", "work", "trace", "install", "eval"):
                 self.assertIn(
                     command,
@@ -85,15 +75,12 @@ class InstallSmokeTests(unittest.TestCase):
                     f"harness --help did not list `{command}`",
                 )
 
-            # `harness doctor --json` should be runnable.
             doctor = subprocess.run(
                 [str(harness_bin), "doctor", "--json"],
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
-            # Doctor may exit 0 or 1 depending on Docker, but
-            # the output should be valid JSON.
             try:
                 payload = json.loads(doctor.stdout)
             except json.JSONDecodeError:

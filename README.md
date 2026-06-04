@@ -76,7 +76,6 @@ harness plan "how should we fix it?"  # read-only implementation plan
 harness "fix the failing tests"       # run one task with sandboxed typed tools
 harness -p "summarize the repo"       # one-shot headless alias
 harness --plan "add OAuth"            # one-shot read-only plan alias
-harness run "fix tests" --act-engine rlm  # use the legacy recursive engine
 harness run "fix tests" --permission-mode standard
 harness work "fix the failing tests" --auto-accept
 harness work "fix the failing tests"  # explicit typed-tool work command
@@ -89,22 +88,12 @@ harness mcp list                     # inspect configured MCP servers
 harness mcp setup                    # guided MCP setup for downloaded users
 harness mcp tools github             # verify an MCP server and list its tools
 harness mcp trust github             # allow autonomous calls to a vetted MCP
-harness mcp disable github           # pause a configured MCP without deleting it
-harness mcp add github --transport http --url https://mcp.example/github \
-  --auth bearer_env --token-env GITHUB_TOKEN --purpose github
-harness mcp add files --transport stdio --command npx --purpose files \
-  --args -y @modelcontextprotocol/server-filesystem "$PWD"
-harness /provider openrouter --api-key <key>
-harness /model qwen/qwen3.7-max
-harness /config
 harness readiness                     # check first-run and daily-driver setup
 harness dogfood                       # run readiness, eval, and feedback proof checks
 harness taste                         # show active taste and project conventions
 harness taste context                 # show the prompt context future runs will receive
 harness taste learn "Prefer small, reviewable diffs." --active
 harness taste scan                    # learn project style and verification conventions
-harness profile                      # show learned taste and project conventions
-harness profile learn "Prefer small, reviewable diffs." --active
 harness evolve                       # review proposed prompt/policy/eval improvements
 harness feedback add "Liked the concise summary." --rating good
 harness doctor
@@ -122,24 +111,14 @@ Use `harness status` as the daily-driver handoff: it summarizes provider/API key
 state, latest thread, taste, evolution, MCP configuration, storage paths, and a
 short `next` list.
 
-MCP servers are configured separately in `~/.harness/mcp.json` (or
-`HARNESS_MCP_CONFIG`). Each server has transport, auth, and purpose metadata.
-Local stdio MCPs run as subprocesses with newline-delimited JSON-RPC, bounded
-timeouts, and optional `--env KEY=value` entries; hosted streamable HTTP/SSE
-MCPs include the negotiated protocol/session headers and env-backed auth.
-During a run, Harness injects enabled MCP purpose routes into planning and action
-selection, highlights purpose matches for the current task, and exposes
-`mcp_list_tools` / `mcp_call_tool` typed actions for workflow-time tool discovery
-and invocation. Auth uses env-backed bearer/API-key config so downloaded users
-can keep credentials out of the config file. Trusted MCP servers may be called
-autonomously; approval-gated MCPs require explicit approval before remote tool
-calls.
-Use `harness mcp tools <name>` to smoke-test auth and inspect exposed tools,
-`harness mcp trust/untrust <name>` to control autonomous use, and
-`harness mcp enable/disable <name>` to scope what a downloaded user's harness can
-see during workflows.
-For first-time setup, `harness mcp setup` walks through name, transport,
-endpoint, purpose labels, and env-var-backed auth without storing raw secrets.
+MCP servers are configured in `~/.harness/mcp.json` (or `HARNESS_MCP_CONFIG`)
+with transport, auth, and purpose metadata. Local stdio MCPs run as
+subprocesses with bounded newline-delimited JSON-RPC; hosted HTTP/SSE MCPs use
+negotiated protocol/session headers and env-backed auth. Use
+`harness mcp setup` for guided setup, `harness mcp tools <name>` to smoke-test
+auth, `harness mcp trust/untrust <name>` to control autonomous use, and
+`harness mcp enable/disable <name>` to scope what Harness can see during
+workflows.
 
 Supported provider shortcuts include `openrouter`, `openai`, `groq`, `together`,
 `fireworks`, `deepinfra`, `opencode-go`, `custom`, and `stub`.

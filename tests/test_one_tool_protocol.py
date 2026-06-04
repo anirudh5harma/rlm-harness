@@ -40,19 +40,14 @@ class StableToolListTests(unittest.TestCase):
         registry = default_tool_registry()
         names_a = registry.names()
         names_b = registry.names()
-        # Deterministic: same registry returns the same list.
         self.assertEqual(names_a, names_b)
-        # Sorted for cross-version stability.
         self.assertEqual(names_a, sorted(names_a))
-        # Non-empty.
         self.assertGreater(len(names_a), 5)
-        # No duplicates.
         self.assertEqual(len(set(names_a)), len(names_a))
 
     def test_default_registry_exposes_only_public_tools(self):
         registry = default_tool_registry()
         public = registry.all()
-        # Every public tool has a non-empty summary and a name.
         for descriptor in public:
             self.assertTrue(descriptor.name)
             self.assertTrue(descriptor.summary)
@@ -65,20 +60,10 @@ class StableToolListTests(unittest.TestCase):
         registry = default_tool_registry()
         payload = registry.payload()
         serialised = json.dumps(payload)
-        # Round-trip without loss.
         self.assertEqual(json.loads(serialised), payload)
 
 
 class ToolExecutionRecordsBothEventsTests(unittest.TestCase):
-    def _setup(self) -> tuple[Path, Path, TraceStore]:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            workspace = Path(temp_dir)
-            (workspace / "README.md").write_text("# Test\nA test project.\n")
-            trace_db = workspace / "trace.db"
-            traces = TraceStore(trace_db)
-            traces.start_run("readme", str(workspace), thread_id="t")
-            return workspace, trace_db, traces
-
     def test_executor_emits_action_and_observation_events(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             workspace = Path(temp_dir)
@@ -89,16 +74,10 @@ class ToolExecutionRecordsBothEventsTests(unittest.TestCase):
 
             executor = ToolExecutor(workspace)
             action = ReadFileAction(path="README.md", reason="orient")
-            # The executor returns an observation directly; the
-            # graph code that wires it to the trace is in
-            # `execute_action` of the legacy graph. The Phase C
-            # contract: every action kind has a stable descriptor
-            # and the executor round-trips it.
             observation = executor.execute(action)
             self.assertIsNotNone(observation)
             self.assertEqual(observation.action_id, action.action_id)
 
-            # The descriptor for the action kind exists.
             descriptor = default_tool_registry().for_action_kind(action.kind)
             self.assertEqual(descriptor.name, "read_file")
             self.assertEqual(descriptor.risk.value, "read")
@@ -153,10 +132,6 @@ class OneProtocolEnforcementTests(unittest.TestCase):
         """
         import rlm_harness.graph.nodes as nodes
 
-        # The supervisor (Phase A) is the default control plane.
-        # It uses the RLM runtime which exposes typed tools as
-        # Python callables. The graph node parser is no longer
-        # on the production path.
         self.assertFalse(hasattr(nodes, "parse_python_action"))
         self.assertFalse(hasattr(nodes.Nodes, "_select_sandbox_action"))
 
@@ -167,7 +142,6 @@ class OneProtocolEnforcementTests(unittest.TestCase):
         import rlm_harness.graph.nodes as nodes
 
         self.assertTrue(hasattr(nodes.Nodes, "_select_tool_action"))
-        # The sandbox-only Python action parser is gone.
         self.assertFalse(hasattr(nodes, "parse_python_action"))
 
 

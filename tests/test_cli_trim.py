@@ -7,6 +7,7 @@ The pivot plan's Phase F gate:
 This test asserts the gate directly, plus a smoke test for the
 `harness install` extension command (Phase F stub).
 """
+import json
 import subprocess
 import sys
 import tempfile
@@ -33,12 +34,8 @@ class CliTrimGateTests(unittest.TestCase):
             timeout=30,
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        # Extract the metavar from the usage line. The
-        # metavar is the `{a,b,c}` brace list of public
-        # commands.
         for line in result.stdout.splitlines():
             if line.strip().startswith("{"):
-                # Strip the `{` and `}` and split on `,`.
                 inside = line.strip().strip("{}")
                 names = [name.strip() for name in inside.split(",") if name.strip()]
                 self.assertLessEqual(
@@ -46,8 +43,6 @@ class CliTrimGateTests(unittest.TestCase):
                     12,
                     f"help metavar lists {len(names)} commands: {names}",
                 )
-                # The set of advertised commands is a subset
-                # of the public set.
                 self.assertTrue(set(names).issubset(PUBLIC_COMMANDS))
                 return
         self.fail("Could not find a `{...}` metavar in harness --help output")
@@ -70,10 +65,6 @@ class CliTrimGateTests(unittest.TestCase):
             text=True,
             timeout=30,
         )
-        # `run` is still a valid subcommand; the parser
-        # accepts it. The exit code may be non-zero if the
-        # parser is in strict mode, but the error must not be
-        # "unrecognized arguments".
         self.assertNotIn("unrecognized arguments", result.stderr + result.stdout)
 
     def test_install_command_is_registered(self):
@@ -108,12 +99,10 @@ class InstallCommandStubTests(unittest.TestCase):
                 cwd=temp_dir,
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr)
-            import json
 
             payload = json.loads(result.stdout)
             self.assertEqual(payload["source"], "npm:foo-bar")
             self.assertEqual(payload["status"], "stub")
-            # The target sits under the default extension root.
             target = Path(payload["target"])
             extension_root = Path(default_extension_root())
             try:
@@ -140,7 +129,6 @@ class InstallCommandStubTests(unittest.TestCase):
                 cwd=temp_dir,
             )
             self.assertEqual(result.returncode, 0, msg=result.stderr)
-            import json
 
             payload = json.loads(result.stdout)
             self.assertEqual(payload["extensions"], [])
