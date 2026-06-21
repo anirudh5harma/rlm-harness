@@ -156,6 +156,29 @@ class LMClient:
                 "answer['ready'] = True\n"
                 "print(summary)"
             )
+        elif '"autonomy":"plan"' in user_text or '"autonomy": "plan"' in user_text:
+            code = (
+                "orient = plan_orientation()\n"
+                "lines = ['Implementation Plan']\n"
+                "if orient['orientation_files']:\n"
+                "    lines.append('Start with:')\n"
+                "    lines.extend(f'- {f}' for f in orient['orientation_files'])\n"
+                "    target = orient['orientation_files'][-1]\n"
+                "else:\n"
+                "    target = 'the smallest owned surface'\n"
+                "vc = orient['verification_command']\n"
+                "lines += [\n"
+                "    '1. Confirm the requested behavior against the current project shape.',\n"
+                "    f'2. Inspect {target} before editing.',\n"
+                "    '3. Add the focused regression test for the behavior you want.',\n"
+                "    '4. Make the smallest scoped change that satisfies the test.',\n"
+                "    f'5. Run `{vc}` and report the files changed plus the result.',\n"
+                "]\n"
+                "plan_text = '\\n'.join(lines)\n"
+                "answer['content'] = plan_text\n"
+                "answer['ready'] = True\n"
+                "print(plan_text)"
+            )
         elif "summarize" in lower or "summary" in lower or "explain" in lower:
             code = (
                 "overview = project_overview()\n"

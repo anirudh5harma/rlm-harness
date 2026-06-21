@@ -272,6 +272,17 @@ DEFAULT_TOOL_DESCRIPTORS = [
         parameters={"max_files": "optional file cap", "max_read_bytes": "per-file cap"},
     ),
     ToolDescriptor(
+        name="plan_orientation",
+        action_kind="plan_orientation",
+        summary=(
+            "Return workspace-grounded orientation files and the verification command "
+            "for building an implementation plan."
+        ),
+        scope=ToolScope.PROJECT,
+        risk=ActionRisk.READ,
+        parameters={},
+    ),
+    ToolDescriptor(
         name="git_status",
         action_kind="git_status",
         summary="Return git status --short for the workspace.",

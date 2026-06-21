@@ -186,6 +186,11 @@ class ProjectAuditAction(BaseAction):
     risk: ActionRisk = ActionRisk.READ
 
 
+class PlanOrientationAction(BaseAction):
+    kind: Literal["plan_orientation"] = "plan_orientation"
+    risk: ActionRisk = ActionRisk.READ
+
+
 class ProposeChangeAction(BaseAction):
     kind: Literal["propose_file_change"] = "propose_file_change"
     path: str
@@ -264,6 +269,7 @@ AnyAction = Annotated[
         ProjectOverviewAction,
         ProjectSummaryAction,
         ProjectAuditAction,
+        PlanOrientationAction,
         ProposeChangeAction,
         ListPendingChangesAction,
         ApplyPendingChangeAction,

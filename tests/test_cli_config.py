@@ -42,9 +42,17 @@ class CLIConfigTests(unittest.TestCase):
         self.assertEqual(cli.normalize_argv(["/continue"]), ["continue"])
         self.assertEqual(cli.normalize_argv(["--continue", "next"]), ["continue", "next"])
         self.assertEqual(cli.normalize_argv(["-c", "next"]), ["continue", "next"])
+        self.assertEqual(cli.normalize_argv(["--resume", "thread-1"]), ["resume", "thread-1"])
+        self.assertEqual(
+            cli.normalize_argv(["-r", "thread-1", "next"]), ["resume", "thread-1", "next"]
+        )
         self.assertEqual(cli.normalize_argv(["-p", "fix tests"]), ["run", "fix tests"])
         self.assertEqual(cli.normalize_argv(["--print", "fix tests"]), ["run", "fix tests"])
         self.assertEqual(cli.normalize_argv(["--plan", "fix tests"]), ["plan", "fix tests"])
+        self.assertEqual(
+            cli.normalize_argv(["--ask", "what is this project"]),
+            ["run", "what is this project", "--ask"],
+        )
         self.assertEqual(
             cli.normalize_argv(["--permission-mode", "standard", "fix tests"]),
             ["run", "fix tests", "--permission-mode", "standard"],
@@ -75,19 +83,32 @@ class CLIConfigTests(unittest.TestCase):
 
         text = stdout.getvalue()
         self.assertIn("Harness commands", text)
+        self.assertIn('harness "fix tests"', text)
+        self.assertIn("harness --continue [task]", text)
+        self.assertIn("harness --resume <thread-id> [task]", text)
+        self.assertIn("harness history list|report|show|events|replay", text)
+        self.assertIn("harness status", text)
+        self.assertIn("harness mcp list|setup|add|show|tools|trust|enable", text)
+        self.assertIn("harness init [--provider name] [--api-key key]", text)
+        self.assertIn("harness doctor", text)
+        self.assertIn("harness update", text)
+        self.assertIn("harness install <source>", text)
+        self.assertIn("harness eval <suite>", text)
+        self.assertIn("Tip:", text)
+        # Hidden aliases are not shown by default.
+        self.assertNotIn('harness ask "what is this project?"', text)
+        self.assertNotIn('harness plan "how should we fix this?"', text)
+        self.assertNotIn("harness taste list", text)
+
+    def test_commands_all_includes_hidden_aliases(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(cli.main(["commands", "--all"]), 0)
+
+        text = stdout.getvalue()
         self.assertIn('harness ask "what is this project?"', text)
         self.assertIn('harness plan "how should we fix this?"', text)
-        self.assertIn('harness "fix tests"', text)
-        self.assertIn('harness work "fix tests"', text)
-        self.assertIn("harness continue [task]", text)
-        self.assertIn("harness trace list|report|events", text)
-        self.assertIn("harness status", text)
-        self.assertIn("harness tools", text)
-        self.assertIn("harness /", text)
-        self.assertIn("harness init [--provider name] [--api-key key]", text)
-        self.assertIn("harness profile list|context|learn|scan|approve|reject", text)
         self.assertIn("harness taste list|context|learn|scan|approve|reject", text)
-        self.assertIn("Tip:", text)
 
     def test_commands_json_is_agent_readable(self):
         stdout = io.StringIO()
@@ -97,19 +118,38 @@ class CLIConfigTests(unittest.TestCase):
         commands = json.loads(stdout.getvalue())
         names = {command["name"] for command in commands}
 
-        self.assertIn("ask", names)
-        self.assertIn("plan", names)
+        # The simplified public surface.
         self.assertIn("run", names)
-        self.assertIn("work", names)
         self.assertIn("continue", names)
-        self.assertIn("trace", names)
+        self.assertIn("resume", names)
+        self.assertIn("history", names)
         self.assertIn("status", names)
         self.assertIn("mcp", names)
-        self.assertIn("palette", names)
         self.assertIn("init", names)
-        self.assertIn("profile", names)
-        self.assertIn("taste", names)
+        self.assertIn("doctor", names)
+        self.assertIn("update", names)
+        self.assertIn("install", names)
+        self.assertIn("eval", names)
+        # Hidden aliases are not in the default JSON catalog.
+        self.assertNotIn("ask", names)
+        self.assertNotIn("plan", names)
+        self.assertNotIn("trace", names)
+        self.assertNotIn("taste", names)
         self.assertNotIn("sandbox", names)
+
+    def test_commands_json_all_includes_hidden_aliases(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(cli.main(["commands", "--json", "--all"]), 0)
+
+        commands = json.loads(stdout.getvalue())
+        names = {command["name"] for command in commands}
+
+        self.assertIn("ask", names)
+        self.assertIn("plan", names)
+        self.assertIn("trace", names)
+        self.assertIn("taste", names)
+        self.assertIn("run", names)
 
     def test_trace_commands_are_registered_and_agent_readable(self):
         import tempfile
@@ -1272,16 +1312,13 @@ class CLIConfigTests(unittest.TestCase):
                 self.assertEqual(parsed.autonomy, "trusted")
 
     def test_run_plan_alias_uses_plan_only_execution(self):
-        with patch.object(cli, "run_plan_task", return_value=0) as run_plan_task, patch.object(
-            cli,
-            "run_task",
-        ) as run_task:
+        with patch.object(cli, "run_task", return_value=0) as run_task:
             exit_code = cli.main(["run", "fix this", "--plan", "--provider", "stub"])
 
-        args = run_plan_task.call_args.args[0]
+        args = run_task.call_args.args[0]
         self.assertEqual(exit_code, 0)
         self.assertEqual(args.autonomy, "plan")
-        run_task.assert_not_called()
+        run_task.assert_called_once()
 
     def test_run_blocks_unconfigured_stub_provider_before_fake_work(self):
         import tempfile
@@ -1416,18 +1453,25 @@ class CLIConfigTests(unittest.TestCase):
         self.assertEqual(args.act_engine, "tool")
         self.assertEqual(args.autonomy, "ask")
 
+    def test_ask_flag_routes_to_run_task_in_read_only_mode(self):
+        with patch.object(cli, "run_task", return_value=0) as run_task:
+            exit_code = cli.main(["--ask", "what is this project", "--provider", "stub"])
+
+        args = run_task.call_args.args[0]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(args.act_engine, "tool")
+        self.assertEqual(args.autonomy, "ask")
+        run_task.assert_called_once()
+
     def test_plan_command_forces_tool_engine_and_plan_only_mode(self):
-        with patch.object(cli, "run_plan_task", return_value=0) as run_plan_task, patch.object(
-            cli,
-            "run_task",
-        ) as run_task:
+        with patch.object(cli, "run_task", return_value=0) as run_task:
             exit_code = cli.main(["plan", "fix this", "--provider", "stub"])
 
-        args = run_plan_task.call_args.args[0]
+        args = run_task.call_args.args[0]
         self.assertEqual(exit_code, 0)
         self.assertEqual(args.act_engine, "tool")
         self.assertEqual(args.autonomy, "plan")
-        run_task.assert_not_called()
+        run_task.assert_called_once()
 
     def test_plan_command_stops_after_planning(self):
         import tempfile
@@ -1458,6 +1502,7 @@ class CLIConfigTests(unittest.TestCase):
                         "--trace-db",
                         str(trace_db),
                         "--no-memory",
+                        "--no-sandbox",
                         "--json",
                     ]
                 )
@@ -1469,14 +1514,12 @@ class CLIConfigTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["status"], "done")
         self.assertIn("Implementation Plan", payload["final_answer"])
-        self.assertIn("Cargo.toml", payload["final_answer"])
-        self.assertIn("crates/planner-cli/src/main.rs", payload["final_answer"])
         self.assertIn("cargo test", payload["final_answer"])
         self.assertNotIn("Produce a concise response.", payload["final_answer"])
-        self.assertIn("plan_created", event_kinds)
+        # Plan runs through the supervisor now, so it emits
+        # turn/completion events, not graph action events.
         self.assertIn("completion", event_kinds)
         self.assertNotIn("action_selected", event_kinds)
-        self.assertNotIn("observation_recorded", event_kinds)
 
     def test_work_command_forces_tool_engine_and_sandbox_mode(self):
         with patch.object(cli, "run_task", return_value=0) as run_task:

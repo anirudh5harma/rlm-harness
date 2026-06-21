@@ -170,6 +170,7 @@ def _local_workspace_tool_bindings() -> dict[str, Any]:
         "project_overview": _workspace_tools.project_overview,
         "project_summary": _workspace_tools.project_summary,
         "project_audit": _workspace_tools.project_audit,
+        "plan_orientation": _workspace_tools.plan_orientation,
         "propose_file_change": _workspace_tools.propose_file_change,
         "list_pending_changes": _workspace_tools.list_pending_changes,
         "apply_pending_change": _workspace_tools.apply_pending_change,
@@ -871,6 +872,11 @@ For project review, audit, risk, issue, or gap-analysis questions, use
 project_audit() as a baseline and inspect relevant source/config files before
 returning evidence-backed findings. Do not answer these questions with only a
 file inventory.
+
+When asked to plan a change, call plan_orientation() to get the workspace's
+high-signal files and verification command, then format a concise
+implementation plan that names the files to inspect and the verification
+command to run. Do not edit files in plan mode.
 """
 
 

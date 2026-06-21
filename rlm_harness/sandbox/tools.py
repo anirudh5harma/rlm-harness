@@ -436,6 +436,33 @@ def project_audit(
     )
 
 
+def plan_orientation() -> dict[str, Any]:
+    """Return workspace-grounded orientation for building an implementation plan.
+
+    This is the tool the model calls when asked to plan a change.
+    It inspects the workspace and returns the high-signal files to
+    orient around plus the project-native verification command. The
+    model formats these into a plan; the tool does not write anything.
+    """
+    overview = project_overview(max_files=300, max_read_bytes=12_000)
+    files = [path for path in overview.get("files", []) if isinstance(path, str)]
+    documents = [doc for doc in overview.get("documents", []) if isinstance(doc, dict)]
+    doc_paths = [str(doc.get("path")) for doc in documents if doc.get("path")]
+    package = package_json_from_documents(documents)
+    cargo = cargo_package_from_documents(documents)
+    scripts = package.get("scripts", {}) if package else {}
+
+    orientation = project_orientation_files(files, doc_paths)
+    verification_commands = audit_verification_commands(scripts, files, cargo)
+    verification = verification_commands[0] if verification_commands else "the project test command"
+
+    return {
+        "orientation_files": orientation[:5],
+        "verification_command": verification,
+        "all_files_count": len(files),
+    }
+
+
 def is_project_overview_payload(payload: dict) -> bool:
     return isinstance(payload.get("files"), list) and isinstance(payload.get("documents"), list)
 
@@ -1355,6 +1382,7 @@ def tool_names() -> list[str]:
         "project_overview",
         "project_summary",
         "project_audit",
+        "plan_orientation",
         "write_file",
         "apply_patch",
         "run_shell",
@@ -1523,6 +1551,14 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
             "technical-debt questions."
         ),
         "parameters": {"max_files": "optional file cap", "max_read_bytes": "optional per-file cap"},
+    },
+    {
+        "name": "plan_orientation",
+        "description": (
+            "Return workspace-grounded orientation files and the verification command "
+            "for building an implementation plan. Call this when asked to plan a change."
+        ),
+        "parameters": {},
     },
     {
         "name": "write_file",

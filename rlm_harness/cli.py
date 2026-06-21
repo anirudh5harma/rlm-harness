@@ -74,7 +74,8 @@ def cmd_ask(args: argparse.Namespace) -> int:
 def cmd_plan(args: argparse.Namespace) -> int:
     args.act_engine = "tool"
     args.autonomy = AutonomyMode.PLAN.value
-    return run_plan_task(args, args.task, args.thread_id, Path(args.workspace).resolve())
+    args.plan_only = True
+    return run_task(args, args.task, args.thread_id, Path(args.workspace).resolve())
 
 
 def cmd_work(args: argparse.Namespace) -> int:
@@ -118,9 +119,7 @@ def run_or_plan_task(
     workspace: Path,
 ) -> int:
     apply_permission_aliases(args)
-    if args.autonomy == AutonomyMode.PLAN.value:
-        args.act_engine = "tool"
-        return run_plan_task(args, task, thread_id, workspace)
+    args.act_engine = "tool"
     return run_task(args, task, thread_id, workspace)
 
 

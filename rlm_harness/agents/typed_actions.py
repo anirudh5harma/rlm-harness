@@ -187,6 +187,7 @@ def default_action_payload(action_kind: str) -> dict:
         "project_overview": {"kind": "project_overview"},
         "project_summary": {"kind": "project_summary"},
         "project_audit": {"kind": "project_audit"},
+        "plan_orientation": {"kind": "plan_orientation"},
         "propose_file_change": {
             "kind": "propose_file_change",
             "path": ".",

@@ -28,6 +28,7 @@ from rlm_harness.actions import (
     ObservationStatus,
     PatchObservation,
     PermissionObservation,
+    PlanOrientationAction,
     ProjectAuditAction,
     ProjectOverviewAction,
     ProjectSummaryAction,
@@ -230,6 +231,12 @@ class ToolExecutor:
                     max_read_bytes=action.max_read_bytes,
                 ),
                 summary="project audit",
+            )
+        if isinstance(action, PlanOrientationAction):
+            return DataObservation(
+                action_id=action.action_id,
+                data=sandbox_tools.plan_orientation(),
+                summary="plan orientation",
             )
         if isinstance(action, ProposeChangeAction):
             return DataObservation(
