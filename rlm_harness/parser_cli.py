@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from rlm_harness import __version__
-from rlm_harness.cli_catalog import DEFAULT_PROG, LEGACY_COMMANDS, PUBLIC_COMMANDS
+from rlm_harness.cli_catalog import DEFAULT_PROG, PUBLIC_COMMANDS
 from rlm_harness.config import default_base_url, default_model, default_provider
 from rlm_harness.extension_cli import add_install_command
 from rlm_harness.learning_cli import add_learning_commands
@@ -74,9 +74,7 @@ def build_parser(callbacks: RootCommandCallbacks) -> argparse.ArgumentParser:
     root.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = root.add_subparsers(
         dest="command",
-        metavar=(
-            "{ask,work,continue,resume,trace,status,doctor,eval,init,install,update,commands}"
-        ),
+        metavar="{init,doctor,status,history,mcp,eval,update,install}",
         required=True,
     )
 
@@ -92,7 +90,8 @@ def build_parser(callbacks: RootCommandCallbacks) -> argparse.ArgumentParser:
         cmd_resume=callbacks.cmd_resume,
         cmd_continue=callbacks.cmd_continue,
     )
-    add_trace_command(subparsers)
+    add_trace_command(subparsers, name="trace")
+    add_trace_command(subparsers, name="history")
     add_install_command(subparsers)
     add_onboarding_commands(subparsers)
     add_provider_commands(subparsers)
@@ -105,9 +104,12 @@ def build_parser(callbacks: RootCommandCallbacks) -> argparse.ArgumentParser:
     add_memory_command(subparsers)
     add_sandbox_command(subparsers, add_model_args)
 
+    # Only the PUBLIC_COMMANDS are advertised in `--help`. Legacy
+    # aliases are still registered (so `harness run`, `harness taste`,
+    # `/ask`, etc. keep working) but hidden from the choices list.
     subparsers._choices_actions = [  # type: ignore[attr-defined]
         action
         for action in subparsers._choices_actions  # type: ignore[attr-defined]
-        if action.dest in (set(PUBLIC_COMMANDS) | set(LEGACY_COMMANDS))
+        if action.dest in set(PUBLIC_COMMANDS)
     ]
     return root

@@ -15,7 +15,10 @@ from rlm_harness.tools import default_tool_registry, render_tool_catalog
 
 
 def cmd_commands(args: argparse.Namespace) -> int:
-    commands = command_catalog(include_internal=args.include_internal)
+    commands = command_catalog(
+        include_internal=args.include_internal,
+        include_legacy=args.include_all,
+    )
     if args.json_output:
         print(json.dumps(commands, sort_keys=True))
     else:
@@ -51,6 +54,12 @@ def add_surface_commands(subparsers) -> None:
     commands = subparsers.add_parser("commands", help="List the command surface.")
     commands.add_argument("--json", dest="json_output", action="store_true")
     commands.add_argument("--include-internal", action="store_true")
+    commands.add_argument(
+        "--all",
+        dest="include_all",
+        action="store_true",
+        help="Include hidden compatibility aliases (run, ask, plan, taste, etc.).",
+    )
     commands.set_defaults(func=cmd_commands)
 
     tools = subparsers.add_parser("tools", help="List action capabilities.")

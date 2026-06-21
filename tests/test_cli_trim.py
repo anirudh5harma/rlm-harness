@@ -35,8 +35,9 @@ class CliTrimGateTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         for line in result.stdout.splitlines():
-            if line.strip().startswith("{"):
-                inside = line.strip().strip("{}")
+            stripped = line.strip()
+            if stripped.startswith("{") and "}" in stripped:
+                inside = stripped[1 : stripped.index("}")]
                 names = [name.strip() for name in inside.split(",") if name.strip()]
                 self.assertLessEqual(
                     len(names),

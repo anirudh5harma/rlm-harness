@@ -481,8 +481,13 @@ class TraceStoreTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(raised.exception.code, 0)
-        self.assertIn("run", help_text)
-        self.assertIn("resume", help_text)
+        # Public surface is the simplified 8-command set.
+        self.assertIn("history", help_text)
+        self.assertIn("status", help_text)
+        self.assertIn("init", help_text)
+        self.assertIn("doctor", help_text)
+        # Legacy aliases and internal commands are hidden from --help.
+        self.assertNotIn("resume", help_text)
         self.assertNotIn("benchmark-model", help_text)
         self.assertNotIn("sandbox", help_text)
         self.assertIn("--model", run_help.getvalue())

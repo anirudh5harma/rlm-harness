@@ -18,6 +18,7 @@ from rlm_harness.kernel import AutonomyMode
 
 ROOT_PRINT_FLAGS = {"-p", "--print"}
 ROOT_BOOLEAN_RUN_FLAGS = {
+    "--ask": "--ask",
     "--auto-accept": "--auto-accept",
     "-t": "--trust",
     "--trust": "--trust",
@@ -90,6 +91,8 @@ def normalize_argv(argv: list[str] | None) -> list[str]:
         return ["palette", *argv[1:]]
     if argv[0] in {"-c", "--continue"}:
         return ["continue", *argv[1:]]
+    if argv[0] in {"-r", "--resume"}:
+        return ["resume", *argv[1:]]
     if argv[0].startswith("/") and len(argv[0]) > 1:
         argv = [argv[0][1:], *argv[1:]]
     if argv[0] == "help":

@@ -70,46 +70,33 @@ light cyan when the terminal supports color.
 
 ```bash
 harness                              # interactive mode
-harness /                            # show slash commands
-harness ask "what is this project?"   # read-only workspace answer
-harness plan "how should we fix it?"  # read-only implementation plan
-harness "fix the failing tests"       # run one task with sandboxed typed tools
-harness -p "summarize the repo"       # one-shot headless alias
-harness --plan "add OAuth"            # one-shot read-only plan alias
-harness run "fix tests" --permission-mode standard
-harness work "fix the failing tests" --auto-accept
-harness work "fix the failing tests"  # explicit typed-tool work command
-harness continue "do the next step"   # continue the latest thread
-harness commands                     # list the clean public command surface
-harness status                       # show current state and recommended next actions
-harness tools                        # inspect tool capabilities and risk
+harness "fix the failing tests"      # run one coding task (the primary shape)
+harness "what is this project?" --ask   # read-only answer, no edits
+harness "how should we fix it?" --plan  # read-only implementation plan
+harness -c "do the next step"        # continue the latest thread
+harness -r <thread-id> "next step"   # resume a specific thread
+harness history list                 # show recent runs
+harness history show <run-id>        # timeline of a run
+harness status                       # current state and recommended next actions
 harness init --provider openrouter --api-key <key>
+harness doctor                       # check local setup and sandbox
 harness mcp list                     # inspect configured MCP servers
-harness mcp setup                    # guided MCP setup for downloaded users
-harness mcp tools github             # verify an MCP server and list its tools
-harness mcp trust github             # allow autonomous calls to a vetted MCP
-harness readiness                     # check first-run and daily-driver setup
-harness dogfood                       # run readiness, eval, and feedback proof checks
-harness taste                         # show active taste and project conventions
-harness taste context                 # show the prompt context future runs will receive
-harness taste learn "Prefer small, reviewable diffs." --active
-harness taste scan                    # learn project style and verification conventions
-harness evolve                       # review proposed prompt/policy/eval improvements
-harness feedback add "Liked the concise summary." --rating good
-harness doctor
+harness eval daily-driver --provider stub --model stub
+harness update                       # upgrade the managed install
 ```
 
-Inside interactive mode, type `/` to show the slash command palette, without the
-lower-level action tool catalog or `/tools` entry. Use `harness tools` when you
-explicitly want that catalog. Harness keeps
-compatibility aliases where they are useful (`-p`,
-`--plan`, `--permission-mode`, `--auto-accept`), but the primary shape is
-Harness-native: `ask` for read-only answers, `plan` for read-only implementation
-plans, `work` for edits, `continue` for thread flow, and `taste` for learning
-your preferences over time.
-Use `harness status` as the daily-driver handoff: it summarizes provider/API key
-state, latest thread, taste, evolution, MCP configuration, storage paths, and a
-short `next` list.
+Harness keeps compatibility aliases where they are useful (`ask`,
+`plan`, `run`, `work`, `trace`, `taste`, `evolve`, `feedback`,
+`provider`, `model`, `readiness`, `config`, `dogfood`, `tools`).
+They still work and are reachable inside interactive mode as slash
+commands (`/ask`, `/taste`, ...); they are just no longer advertised
+in `harness --help`. Run `harness commands --all` to see every
+registered alias. The primary shape is Harness-native: one `harness
+"task"` verb with `--ask` / `--plan` modes, `--continue` / `--resume`
+for thread flow, and `history` for inspecting runs. Use `harness
+status` as the daily-driver handoff: it summarizes provider/API key
+state, latest thread, taste, evolution, MCP configuration, storage
+paths, and a short `next` list.
 
 MCP servers are configured in `~/.harness/mcp.json` (or `HARNESS_MCP_CONFIG`)
 with transport, auth, and purpose metadata. Local stdio MCPs run as

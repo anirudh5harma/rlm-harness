@@ -240,6 +240,12 @@ def add_run_args(
         help="Plan only; do not edit files or run shell actions.",
     )
     command.add_argument(
+        "--ask",
+        dest="ask",
+        action="store_true",
+        help="Read-only mode: answer the task without editing files or running shell actions.",
+    )
+    command.add_argument(
         "--auto-accept",
         action="store_true",
         help="Use trusted tool execution for this run.",

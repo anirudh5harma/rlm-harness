@@ -48,6 +48,7 @@ related: production-grade-harness-revamp.md
 | I.1 — default backend = supervisor | ✅ done | `pytest tests/test_default_supervisor_backend.py -x` 5 passed; 426 tests pass | 2026-06-03 |
 | I.2 — local RLM REPL exposes workspace tools | ✅ done | `sandbox.tools.set_workspace` + `_local_workspace_tool_bindings` injected into `LocalRLMRepl`; 4 new tests in `tests/test_default_supervisor_backend.py` | 2026-06-03 |
 | I.3 — streaming path retries transient provider errors | ✅ done | `LMClient.stream` retries on HTTP 408/425/429/500/502/503/504/522/524 + URLError with exponential backoff (0.5s, 1.0s, 2.0s, max 3 attempts); `_stream_model_call` raises `LMClientError` on exhaustion so `__rlm_stream_error__:` no longer leaks into the final answer; 7 new tests in `tests/test_model_client.py` + 3 in `tests/test_rlm_runtime.py` + 1 regression in `tests/test_default_supervisor_backend.py` | 2026-06-03 |
+| J — CLI simplified to a Claude Code / Codex-style surface | ✅ done | `harness --help` lists 8 commands (init, doctor, status, history, mcp, eval, update, install); `ask`/`plan`/`run`/`work` collapsed into `harness "task"` with `--ask`/`--plan` modes; `--continue`/`--resume` first-class flags; `history` alias for `trace`; legacy verbs kept as hidden aliases; `commands --all` discovers them; 429 tests pass, ruff clean | 2026-06-21 |
 | D — Strict verification | ⏸ not started | four statuses; `done` requires `verified` | — |
 | E — Session tree + replay | ⏸ not started | JSONL tree + `trace show / replay / fork` | — |
 | F — CLI trim + extension model | ⏸ not started | ≤12 top-level commands; `harness install` | — |
@@ -266,6 +267,25 @@ Legend: ✅ done · ⏳ in progress · ⏸ not started · ❌ blocked
   regression tests, not in the dogfood release gate.
 
 ## Breaking changes
+
+- **2026-06-21 — CLI surface simplified to a Claude Code / Codex-style
+  primary set.** `harness --help` now advertises 8 commands
+  (`init`, `doctor`, `status`, `history`, `mcp`, `eval`, `update`,
+  `install`) instead of the previous 25. The task verbs `ask`,
+  `plan`, `run`, `work` are collapsed into the primary shape
+  `harness "task"`, with `--ask` (read-only answer) and `--plan`
+  (read-only plan) as mode flags. `--continue` / `-c` and
+  `--resume` / `-r` are first-class root flags. `trace` is renamed
+  to `history` (with `trace` kept as a hidden alias). **All previous
+  commands still work as hidden aliases** so existing scripts and
+  slash commands keep working; they are simply no longer advertised
+  in `--help`. `harness commands --all` lists the hidden aliases for
+  discovery. The `commands --json` catalog now returns only the
+  simplified surface by default (agent consumers should pass
+  `--all` to see the legacy verbs). Migration: scripts that parsed
+  `harness commands --json` for the full verb list should add
+  `--all`; interactive `/ask`, `/plan`, `/run`, `/taste`, etc. are
+  unchanged. No on-disk data migration.
 
 - **2026-06-03 — `--graph-backend` default flipped to
   `supervisor`.** The default is no longer `auto`. The

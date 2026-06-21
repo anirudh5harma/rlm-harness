@@ -136,8 +136,11 @@ def cmd_trace_replay(args: argparse.Namespace) -> int:
     return 0
 
 
-def add_trace_command(subparsers) -> None:
-    trace = subparsers.add_parser("trace", help="Inspect traces.")
+def add_trace_command(subparsers, *, name: str = "trace") -> None:
+    trace = subparsers.add_parser(
+        name,
+        help="Inspect run history and replay traces." if name == "history" else "Inspect traces.",
+    )
     trace.add_argument("--trace-db", default=str(default_trace_path()))
     trace_subparsers = trace.add_subparsers(dest="trace_command", required=True)
 
