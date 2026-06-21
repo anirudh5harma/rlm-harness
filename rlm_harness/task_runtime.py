@@ -12,6 +12,7 @@ from typing import Any, Optional, TextIO
 from rlm_harness.actions import CompleteTaskAction, CompletionStatus
 from rlm_harness.cli_catalog import (
     ANSI_CYAN,
+    ANSI_RED,
     should_use_color,
     stream_is_tty,
     style_text,
@@ -131,6 +132,22 @@ def should_emit_run_markers(args: argparse.Namespace, stream: TextIO) -> bool:
     return stream_is_tty(stream)
 
 
+def streaming_output_enabled(stream: TextIO) -> bool:
+    """Whether the model's response should stream to the terminal.
+
+    Streaming (token-by-token output) is enabled only in a real TTY
+    *without* an explicit ``HARNESS_PROGRESS`` override. When
+    ``HARNESS_PROGRESS=on`` is set, the user wants the old
+    single-line status mode, not streaming text. When
+    ``HARNESS_PROGRESS=off`` or ``--json``/``--quiet`` is set, no
+    output at all.
+    """
+    progress = terminal_flag(os.environ.get("HARNESS_PROGRESS"))
+    if progress is not None:
+        return False
+    return stream_is_tty(stream)
+
+
 def compact_marker_text(text: str, max_chars: int = 120) -> str:
     compact = " ".join(text.split())
     if len(compact) <= max_chars:
@@ -142,12 +159,59 @@ def run_command_label(task: str) -> str:
     return f"harness run {shlex.quote(compact_marker_text(task))}"
 
 
+def _extract_diff_from_code(code: str, stdout: str) -> str:
+    """Detect file-edit operations in a REPL block and return a diff summary.
+
+    The model writes files via ``write_file(path, content)`` or
+    ``apply_patch(diff)``. When we see those calls in the code, we
+    produce a one-line summary so the user knows what changed without
+    having to inspect the full stdout.
+    """
+    if not code:
+        return ""
+    # ``write_file('path', ...)`` or ``write_file("path", ...)``
+    import re
+
+    write_match = re.search(r"write_file\(\s*['\"]([^'\"]+)['\"]", code)
+    if write_match:
+        path = write_match.group(1)
+        return f"[edit] {path}"
+    # ``apply_patch(diff)`` — try to extract changed file names from
+    # the diff header lines in stdout.
+    if "apply_patch" in code and stdout:
+        files = re.findall(r"^(?:---|\+\+\+) [ab]/(.+)$", stdout, re.MULTILINE)
+        if files:
+            unique = list(dict.fromkeys(files))
+            return f"[patch] {', '.join(unique[:5])}"
+    # ``propose_file_change('path', ...)`` — show the proposal.
+    propose_match = re.search(r"propose_file_change\(\s*['\"]([^'\"]+)['\"]", code)
+    if propose_match:
+        path = propose_match.group(1)
+        return f"[proposed] {path}"
+    return ""
+
+
+def _first_error_line(stderr: str) -> str:
+    """Extract the last line of a Python traceback (the actual error)."""
+    if not stderr:
+        return "unknown error"
+    lines = stderr.strip().splitlines()
+    # The error is usually the last non-empty line.
+    for line in reversed(lines):
+        stripped = line.strip()
+        if stripped and not stripped.startswith(("File ", "Traceback", "  ")):
+            return stripped
+    return lines[-1] if lines else "unknown error"
+
+
 class RunConsole:
     def __init__(self, args: argparse.Namespace, stream: Optional[TextIO] = None):
         self.stream = stream or sys.stderr
         self.enabled = should_emit_run_markers(args, self.stream)
         self.color = should_use_color(self.stream)
         self.memory_enabled = not getattr(args, "no_memory", False)
+        self.json_output = getattr(args, "json_output", False)
+        self.quiet = getattr(args, "quiet", False)
         self._rich_status: Any = None
         self._line_active = False
         self._use_rich = (
@@ -156,6 +220,16 @@ class RunConsole:
             and RichConsole is not None
             and RichStatus is not None
         )
+        # Streaming state: when we're printing the model's response
+        # token-by-token, we stop using the status line and write
+        # directly to the stream so the user sees the text arrive.
+        self._streaming_active = False
+        self._turn_tokens = 0
+        # Streaming output (token-by-token) is only enabled in a real
+        # TTY without an explicit HARNESS_PROGRESS override. When the
+        # old status-line mode is forced, we keep the single-line
+        # contract.
+        self.streaming = streaming_output_enabled(self.stream)
 
     def start(self, args: argparse.Namespace, task: str, workspace: Path) -> None:
         mode = [
@@ -214,7 +288,136 @@ class RunConsole:
             label, message = marker
             self.marker(label, message)
 
+    def on_turn_event(self, event: Any) -> None:
+        """Handle a streaming RLM turn event from the supervisor.
+
+        This is the ``stream_sink`` callback. It renders the model's
+        response, tool observations, and token usage to stderr in real
+        time. When ``json_output`` or ``quiet`` is set, it is a no-op
+        so the final answer stays clean for piping.
+        """
+        from rlm_harness.rlm.runtime import (
+            IterationFinished,
+            ObservationRecorded,
+            TokenDelta,
+            TurnFinished,
+            TurnStarted,
+        )
+
+        if self.json_output or self.quiet:
+            return
+        if not self.enabled:
+            return
+        # Streaming token output and observation rendering are only
+        # active in a real TTY. When the old status-line mode is
+        # forced via HARNESS_PROGRESS, keep the single-line contract.
+        if not self.streaming:
+            return
+
+        if isinstance(event, TurnStarted):
+            # Stop any previous status line; the model is about to
+            # stream its response.
+            self._stop_streaming()
+            self._turn_tokens = 0
+        elif isinstance(event, TokenDelta):
+            # Print the delta directly to the stream so the user sees
+            # the model's response arrive token-by-token.
+            self._write_delta(event.delta)
+        elif isinstance(event, IterationFinished):
+            # The model finished one iteration. If it emitted REPL
+            # blocks, observations will follow — don't add a newline
+            # yet. If it didn't, the response is the final answer.
+            self._turn_tokens += int(event.usage.get("completion_tokens") or 0)
+            if not event.repl_blocks:
+                self._stop_streaming()
+            else:
+                self._stop_streaming()
+                self._write_line("")
+        elif isinstance(event, ObservationRecorded):
+            self._render_observation(event.observation)
+        elif isinstance(event, TurnFinished):
+            result = event.result
+            if result.status == "error":
+                self._write_line(
+                    style_text(f"[error] {result.final_answer}", ANSI_RED, self.color)
+                )
+            elif result.status == "stopped":
+                self._write_line(
+                    style_text(
+                        f"[stopped] {result.iterations} iterations, "
+                        f"{result.tokens_used} tokens",
+                        ANSI_CYAN,
+                        self.color,
+                    )
+                )
+            elif result.status == "done":
+                # Don't print the final answer here — it goes to
+                # stdout via emit_run_output. Show a summary if
+                # the turn used tokens.
+                if result.tokens_used > 0:
+                    self._write_line(
+                        style_text(
+                            f"[done] {result.iterations} iters, "
+                            f"{result.tokens_used} tokens",
+                            ANSI_CYAN,
+                            self.color,
+                        )
+                    )
+
+    def _write_delta(self, delta: str) -> None:
+        """Write a streaming token delta to the stream."""
+        if not self.enabled:
+            return
+        # Stop the status line before printing tokens.
+        if self._rich_status is not None:
+            self._rich_status.stop()
+            self._rich_status = None
+        self._streaming_active = True
+        self.stream.write(delta)
+        self.stream.flush()
+
+    def _stop_streaming(self) -> None:
+        if self._streaming_active:
+            self.stream.write("\n")
+            self.stream.flush()
+            self._streaming_active = False
+
+    def _write_line(self, text: str) -> None:
+        if not self.enabled:
+            return
+        self._stop_streaming()
+        if text:
+            self.stream.write(text + "\n")
+            self.stream.flush()
+
+    def _render_observation(self, observation: Any) -> None:
+        """Render a REPL observation (tool output) to the stream."""
+        if not self.enabled:
+            return
+        status = getattr(observation, "status", "ok")
+        stdout = getattr(observation, "stdout", "")
+        stderr = getattr(observation, "stderr", "")
+        code = getattr(observation, "code", "")
+
+        # Detect file-edit operations and show a diff summary.
+        diff_summary = _extract_diff_from_code(code, stdout)
+        if diff_summary:
+            self._write_line(style_text(diff_summary, ANSI_CYAN, self.color))
+            return
+
+        if status == "error" and stderr:
+            # Show a clean one-line error, not the full traceback.
+            first_error = _first_error_line(stderr)
+            self._write_line(style_text(f"[tool error] {first_error}", ANSI_RED, self.color))
+            return
+
+        # For non-error observations, show a brief summary.
+        if stdout:
+            preview = stdout.strip().split("\n")[0][:120]
+            self._write_line(style_text(f"[tool] {preview}", ANSI_CYAN, self.color))
+
     def finish(self, status: str, run_id: str) -> None:
+        self._stop_streaming()
         self.clear()
 
     def error(self, message: str) -> None:
@@ -236,6 +439,9 @@ class RunConsole:
 def apply_permission_aliases(args: argparse.Namespace) -> argparse.Namespace:
     if getattr(args, "plan_only", False):
         args.autonomy = AutonomyMode.PLAN.value
+    if getattr(args, "ask", False):
+        args.autonomy = AutonomyMode.ASK.value
+        args.act_engine = "tool"
     permission_mode = getattr(args, "permission_mode", None)
     if permission_mode:
         args.autonomy = PERMISSION_MODE_ALIASES[permission_mode]
@@ -345,6 +551,7 @@ def run_task(
                     memory,
                     profile_memory,
                     run_id=run_id,
+                    console=console,
                 )
                 # The supervisor's `_finish_run` is the canonical
                 # closer; it has the verification-aware status.
@@ -754,6 +961,8 @@ def run_supervisor_graph(
     memory: Optional[Memory],
     profile_memory: Optional[Memory],
     run_id: Optional[str] = None,
+    *,
+    console: Optional[RunConsole] = None,
 ) -> HarnessState:
     """Run the supervisor as the control plane.
 
@@ -814,6 +1023,7 @@ def run_supervisor_graph(
     # This keeps every typed event under the same `runs` row.
     run_state.request.run_id = run_id
     run_state.request.thread_id = thread_id or run_id
+    run_state.request.autonomy = AutonomyMode(args.autonomy)
     config = SupervisorConfig(
         max_turns=max_turns,
         max_subcalls_per_turn=max_subcalls_per_turn,
@@ -822,6 +1032,7 @@ def run_supervisor_graph(
             if memory is not None
             else None
         ),
+        stream_sink=console.on_turn_event if console is not None else None,
     )
     supervisor = Supervisor(
         runtime=runtime,

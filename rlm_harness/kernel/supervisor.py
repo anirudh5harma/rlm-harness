@@ -42,6 +42,7 @@ from rlm_harness.memory.paging import MemoryPager, MemoryPagingConfig
 from rlm_harness.rlm.runtime import (
     RLMResult,
     RLMRuntime,
+    RLMTurnEvent,
     TurnFinished,
     TurnStarted,
 )
@@ -68,11 +69,18 @@ class SupervisorConfig:
     `between_turns` is a hook called after every turn with the current
     `RunState` and the turn index. The memory pager uses it; future
     cross-turn services will too.
+
+    `stream_sink` is an optional callback that receives every
+    `RLMTurnEvent` the runtime emits (TokenDelta, IterationFinished,
+    ObservationRecorded, TurnFinished). The console uses it to render
+    streaming output to stderr in real time. When `None`, events are
+    only written to the trace (the pre-streaming behaviour).
     """
 
     max_turns: int = DEFAULT_MAX_TURNS
     max_subcalls_per_turn: int = DEFAULT_MAX_SUBCALLS_PER_TURN
     between_turns: Optional[Callable[[RunState, int], None]] = None
+    stream_sink: Optional[Callable[[RLMTurnEvent], None]] = None
 
 
 class Supervisor:
@@ -135,6 +143,11 @@ class Supervisor:
             context = self._build_turn_context(state)
             events = self.runtime.stream_turn(state.request.task, context=context)
             for event in events:
+                # Forward every event to the stream sink so the
+                # console can render streaming output, diffs, and
+                # token usage in real time.
+                if self.config.stream_sink is not None:
+                    self.config.stream_sink(event)
                 if isinstance(event, TurnStarted):
                     self._record_turn_started(run_id, turn_index, event)
                 elif isinstance(event, TurnFinished):
@@ -142,15 +155,12 @@ class Supervisor:
                     self._record_turn_finished(run_id, turn_index, event)
                     if last_result.status == "error":
                         state.phase = RunPhase.FAILED
-                        state.final_answer = last_result.final_answer
+                        state.final_answer = clean_final_answer(
+                            last_result.final_answer
+                        )
                         self._finish_run(run_id, "error")
                         return state
                     if last_result.status == "done":
-                        # The runtime says `done`, but Phase D
-                        # requires verification before the
-                        # supervisor can call the run `done`.
-                        # We exit the turn loop and run the
-                        # verifier below.
                         break
             # Per-turn paging hook (Phase A.4). Caller may mutate
             # `state.history` or call out to the memory pager.
@@ -174,6 +184,7 @@ class Supervisor:
         return {
             "task": state.request.task,
             "history_summary": state.context.memory_context,
+            "autonomy": state.request.autonomy.value,
         }
 
     def _record_run_started(self, run_id: str, state: RunState) -> None:
@@ -320,7 +331,7 @@ class Supervisor:
         if status == VerificationStatus.FAILED:
             state.phase = RunPhase.FAILED
             if last_result is not None and not state.final_answer:
-                state.final_answer = last_result.final_answer
+                state.final_answer = clean_final_answer(last_result.final_answer)
             self._record_completion(run_id, state, last_result)
             self._finish_run(run_id, "failed")
             return state
@@ -328,42 +339,32 @@ class Supervisor:
         if status == VerificationStatus.UNVERIFIED:
             state.phase = RunPhase.UNVERIFIED
             if last_result is not None and not state.final_answer:
-                state.final_answer = last_result.final_answer
+                state.final_answer = clean_final_answer(last_result.final_answer)
             self._record_completion(run_id, state, last_result)
             self._finish_run(run_id, "unverified")
             return state
 
         if status == VerificationStatus.NOT_APPLICABLE:
-            # No code changes; the runtime's `done` is the
-            # final answer. (Code edits with no changed files
-            # would have surfaced earlier; supervisors with a
-            # verifier pass that classification through the
-            # same code path.)
             if last_result is not None and last_result.status == "done":
                 state.phase = RunPhase.DONE
-                state.final_answer = last_result.final_answer
+                state.final_answer = clean_final_answer(last_result.final_answer)
                 self._record_completion(run_id, state, last_result)
                 self._finish_run(run_id, "done")
                 return state
-            # Out of turns without a final answer: the run is
-            # stopped. Treat as a partial answer.
             state.phase = RunPhase.STOPPED
             if last_result is not None and not state.final_answer:
-                state.final_answer = last_result.final_answer
+                state.final_answer = clean_final_answer(last_result.final_answer)
             self._record_completion(run_id, state, last_result)
             self._finish_run(run_id, "stopped")
             return state
 
         # status == VERIFIED
         if last_result is None or last_result.status != "done":
-            # Should not happen — we only reach `verified` when
-            # the verifier ran AND the runtime said `done`.
-            # Defensive: surface a `failed` and stop.
             state.phase = RunPhase.FAILED
             self._finish_run(run_id, "failed")
             return state
         state.phase = RunPhase.DONE
-        state.final_answer = last_result.final_answer
+        state.final_answer = clean_final_answer(last_result.final_answer)
         self._record_completion(run_id, state, last_result)
         self._finish_run(run_id, "done")
         return state
@@ -397,11 +398,39 @@ def _completion_action(state: RunState, result: Optional[RLMResult]):
     )
 
 
+def clean_final_answer(text: Optional[str]) -> Optional[str]:
+    """Strip raw Python tracebacks and internal noise from a final answer.
+
+    The RLM runtime can surface raw ``Traceback (most recent call
+    last)`` blocks in the final answer when a REPL block errors. That
+    is useful in the trace but leaks internal noise to the user. This
+    helper replaces traceback blocks with a one-line summary so the
+    final answer stays clean and actionable.
+    """
+    if not text or not isinstance(text, str):
+        return text
+    import re
+
+    # Replace ``Traceback (most recent call last): ...`` blocks with
+    # a one-line summary. Keep the last line (the actual error) so
+    # the user sees what went wrong without the full stack.
+    traceback_re = re.compile(
+        r"Traceback \(most recent call last\):\n.*?\n([^\n]+(?:Error|Exception)[^\n]*)",
+        re.DOTALL,
+    )
+    cleaned = traceback_re.sub(r"Error: \1", text)
+    # Strip ``__rlm_stream_error__:`` prefixes that may leak from
+    # the non-streaming path.
+    cleaned = re.sub(r"^__rlm_stream_error__:\s*", "", cleaned)
+    return cleaned
+
+
 __all__ = [
     "DEFAULT_MAX_SUBCALLS_PER_TURN",
     "DEFAULT_MAX_TURNS",
     "Supervisor",
     "SupervisorConfig",
+    "clean_final_answer",
     "page_history_between_turns",
 ]
 
